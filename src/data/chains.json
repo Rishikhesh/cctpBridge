@@ -214,7 +214,7 @@
       "color": "#9945FF",
       "logoChar": "◎",
       "supportedSource": false,
-      "rpcUrl": "https://api.mainnet-beta.solana.com",
+      "rpcUrl": "https://solana-rpc.publicnode.com",
       "usdcMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
       "tokenMessenger": "CCTPV2vPZJS2u2BBsUoscuikbYjnpFmbFsvVuJdgUMQe",
       "messageTransmitter": "CCTPV2Sm4AdWt5296sk4P66VBZ7bEhcARwFaaS9YPbeC",

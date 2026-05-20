@@ -12,7 +12,7 @@ const NET_KEY = "cctp:network";
 export function useWallet() {
   const [network, setNetworkState] = useState<StellarNetwork>(() => {
     const stored = localStorage.getItem(NET_KEY) as StellarNetwork | null;
-    return stored === "mainnet" || stored === "testnet" ? stored : "testnet";
+    return stored === "mainnet" || stored === "testnet" ? stored : "mainnet";
   });
   const [address, setAddress] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);

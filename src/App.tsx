@@ -61,6 +61,9 @@ import {
 import { cn, formatUsdc, formatUsdcFixed, parseUsdc, shortAddr } from "@/lib/utils";
 import { useWallet } from "@/hooks/useWallet";
 import { useEvmWallet } from "@/hooks/useEvmWallet";
+import { useSolanaWallet } from "@/hooks/useSolanaWallet";
+import { isValidSolanaAddress, solanaReceiveMessage } from "@/lib/solana";
+import { PublicKey as SolanaPublicKey } from "@solana/web3.js";
 import { ChainPicker, TokenChip } from "@/components/ChainPicker";
 import { ChainLogo } from "@/components/ChainLogo";
 import {
@@ -100,18 +103,24 @@ interface ProgressState {
 
 const INIT_PROGRESS: ProgressState = { phase: "idle", pollAttempts: 0 };
 
-type Direction = "stellar->evm" | "evm->stellar" | "evm->evm";
+type Direction =
+  | "stellar->evm"
+  | "evm->stellar"
+  | "evm->evm"
+  | "evm->solana";
 
 function detectDirection(from: ChainInfo, to: ChainInfo): Direction | null {
   if (from.kind === "stellar" && to.kind === "evm") return "stellar->evm";
   if (from.kind === "evm" && to.kind === "stellar") return "evm->stellar";
   if (from.kind === "evm" && to.kind === "evm") return "evm->evm";
+  if (from.kind === "evm" && to.kind === "solana") return "evm->solana";
   return null;
 }
 
 function App() {
   const stellarWallet = useWallet();
   const evmWallet = useEvmWallet();
+  const solanaWallet = useSolanaWallet();
   const themeCtl = useTheme();
   const { network, setNetwork } = stellarWallet;
   const config = CCTP_CONFIGS[network];
@@ -174,15 +183,19 @@ function App() {
     if (toChain.kind === "evm" && evmWallet.address) setRecipient(evmWallet.address);
     if (toChain.kind === "stellar" && stellarWallet.address)
       setRecipient(stellarWallet.address);
-  }, [toChain.kind, evmWallet.address, stellarWallet.address, recipient]);
+    if (toChain.kind === "solana" && solanaWallet.address)
+      setRecipient(solanaWallet.address);
+  }, [toChain.kind, evmWallet.address, stellarWallet.address, solanaWallet.address, recipient]);
 
-  // Reset bad recipient on dest change
+  // Reset recipient on dest chain change
   useEffect(() => {
     if (toChain.kind === "evm" && evmWallet.address) setRecipient(evmWallet.address);
     else if (toChain.kind === "stellar" && stellarWallet.address)
       setRecipient(stellarWallet.address);
+    else if (toChain.kind === "solana" && solanaWallet.address)
+      setRecipient(solanaWallet.address);
     else setRecipient("");
-  }, [toChain.id, evmWallet.address, stellarWallet.address]);
+  }, [toChain.id, evmWallet.address, stellarWallet.address, solanaWallet.address]);
 
   // Source balance loader
   const loadStellarBalance = useCallback(async () => {
@@ -227,11 +240,8 @@ function App() {
       .then((f) => {
         if (!aborted) setFees(f);
       })
-      .catch((err) => {
-        if (!aborted) {
-          console.warn("[CCTP] fetchBurnFees failed", err);
-          setFees(null);
-        }
+      .catch(() => {
+        if (!aborted) setFees(null);
       })
       .finally(() => {
         if (!aborted) setFeesLoading(false);
@@ -288,6 +298,7 @@ function App() {
     if (!recipient) return false;
     if (toChain.kind === "evm") return !evmHexValid(recipient);
     if (toChain.kind === "stellar") return !isValidStellarRecipient(recipient);
+    if (toChain.kind === "solana") return !isValidSolanaAddress(recipient);
     return false;
   }, [recipient, toChain.kind]);
 
@@ -297,9 +308,17 @@ function App() {
     parsedAmount > sourceBalanceRaw;
 
   const sourceWalletAddress =
-    fromChain.kind === "stellar" ? stellarWallet.address : evmWallet.address;
+    fromChain.kind === "stellar"
+      ? stellarWallet.address
+      : fromChain.kind === "solana"
+        ? solanaWallet.address
+        : evmWallet.address;
   const destWalletAddress =
-    toChain.kind === "stellar" ? stellarWallet.address : evmWallet.address;
+    toChain.kind === "stellar"
+      ? stellarWallet.address
+      : toChain.kind === "solana"
+        ? solanaWallet.address
+        : evmWallet.address;
 
   const canBridge =
     supported &&
@@ -372,12 +391,7 @@ function App() {
           throw new Error(`[safety] EVM recipient is zero address`);
         if (fromChain.domainId === toChain.domainId)
           throw new Error(`[safety] self-bridge refused (same domain)`);
-        // Stellar amount must lose nothing in 7→6 truncation if user wants exact
-        if (parsedAmount % 10n !== 0n) {
-          console.warn(
-            `[CCTP] amount has non-zero 7th decimal; ${parsedAmount % 10n} subunits will remain on Stellar (CCTP canonical 6-dec).`,
-          );
-        }
+        // Stellar 7th decimal is truncated by CCTP (canonical = 6-dec). Silent dust.
 
         const onStep = (info: BridgeStepInfo) => {
           if (info.step === "approve") setProgress((p) => ({ ...p, phase: "approving" }));
@@ -524,6 +538,99 @@ function App() {
         const ms = await waitForReceipt(toChain, mintTx.txHash);
         if (ms !== "success") throw new Error("Destination tx reverted");
         setProgress((p) => ({ ...p, mintTx: mintTx.txHash, phase: "done" }));
+      }
+
+      if (direction === "evm->solana") {
+        const sender = await ensureEvmConnected();
+        await ensureEvmOnChain(fromChain);
+
+        // Safety: validate Solana recipient + dest config
+        if (!isValidSolanaAddress(recipient))
+          throw new Error(`[safety] Solana recipient invalid: ${recipient}`);
+        if (toChain.kind !== "solana" || !toChain.solana)
+          throw new Error(`[safety] toChain not Solana`);
+        if (toChain.domainId !== 5)
+          throw new Error(`[safety] Solana domain must be 5, got ${toChain.domainId}`);
+
+        // Mint recipient on Solana is the recipient's 32-byte pubkey
+        const recipientPk = new SolanaPublicKey(recipient);
+        const mintRecipientBytes32 = `0x${recipientPk.toBuffer().toString("hex")}` as `0x${string}`;
+        if (mintRecipientBytes32.length !== 66)
+          throw new Error(`[safety] Solana mintRecipient not bytes32`);
+
+        // Approve if needed
+        setProgress((p) => ({ ...p, phase: "approving" }));
+        const allowance = await fetchEvmUsdcAllowance(fromChain, sender as `0x${string}`);
+        if (allowance < parsedAmount) {
+          const approveTx = await evmApproveUsdc(
+            fromChain,
+            sender as `0x${string}`,
+            parsedAmount,
+          );
+          setProgress((p) => ({ ...p, approveTx, phase: "approving" }));
+          const s = await waitForReceipt(fromChain, approveTx);
+          if (s !== "success") throw new Error("Approve reverted");
+        }
+
+        // Burn
+        setProgress((p) => ({ ...p, phase: "burning" }));
+        const burnHash = await evmDepositForBurn(fromChain, sender as `0x${string}`, {
+          amount: parsedAmount,
+          destinationDomain: toChain.domainId,
+          mintRecipient: mintRecipientBytes32,
+          burnToken: fromChain.evm!.usdc,
+          destinationCaller: `0x${"00".repeat(32)}` as `0x${string}`,
+          maxFee,
+          minFinalityThreshold: activeFee.finalityThreshold,
+        });
+        setProgress((p) => ({ ...p, burnTx: burnHash }));
+        const bs = await waitForReceipt(fromChain, burnHash);
+        if (bs !== "success") throw new Error("Burn reverted");
+        setProgress((p) => ({
+          ...p,
+          burnTx: burnHash,
+          phase: "attesting",
+          attestStartedAt: Date.now(),
+          etaSeconds: cctpEtaSeconds(fromChain.domainId, activeFee.finalityThreshold),
+        }));
+
+        // Attest
+        const controller = new AbortController();
+        pollAbort.current = controller;
+        const attestation = await pollAttestation(
+          config.irisApiUrl,
+          fromChain.domainId,
+          burnHash,
+          {
+            signal: controller.signal,
+            onPoll: (u) =>
+              setProgress((p) => ({
+                ...p,
+                pollAttempts: u.attempt,
+                irisStatus: u.status,
+                finalityThresholdExecuted: u.finalityThresholdExecuted,
+                feeExecutedSubunits: u.feeExecuted,
+              })),
+          },
+        );
+        setProgress((p) => ({ ...p, attestation, phase: "minting" }));
+
+        // Connect Solana wallet + call receive_message
+        if (!solanaWallet.address) {
+          await solanaWallet.connect();
+        }
+        const solAddr = solanaWallet.address;
+        if (!solAddr) throw new Error("Solana wallet not connected");
+
+        const { signature } = await solanaReceiveMessage({
+          destChain: toChain,
+          sourceChain: fromChain,
+          recipientPubkey: recipient,
+          messageHex: attestation.message,
+          attestationHex: attestation.attestation,
+        });
+        setProgress((p) => ({ ...p, mintTx: signature, phase: "done" }));
+        return;
       }
 
       if (direction === "evm->stellar") {
@@ -725,6 +832,7 @@ function App() {
         onNetworkChange={setNetwork}
         stellar={stellarWallet}
         evm={evmWallet}
+        solana={solanaWallet}
         onContracts={() => setContractsOpen(true)}
         theme={themeCtl}
       />
@@ -1040,6 +1148,7 @@ function Header({
   onNetworkChange,
   stellar,
   evm,
+  solana,
   onContracts,
   theme,
 }: {
@@ -1047,6 +1156,7 @@ function Header({
   onNetworkChange: (n: StellarNetwork) => void;
   stellar: ReturnType<typeof useWallet>;
   evm: ReturnType<typeof useEvmWallet>;
+  solana: ReturnType<typeof useSolanaWallet>;
   onContracts: () => void;
   theme: ReturnType<typeof useTheme>;
 }) {
@@ -1092,7 +1202,7 @@ function Header({
           </button>
           <WalletPill
             connected={!!stellar.address}
-            label="XLM"
+            label="Stellar"
             address={stellar.address}
             onConnect={stellar.connect}
             onDisconnect={stellar.disconnect}
@@ -1107,6 +1217,15 @@ function Header({
             onDisconnect={evm.disconnect}
             connecting={evm.connecting}
             color="bg-foreground"
+          />
+          <WalletPill
+            connected={!!solana.address}
+            label="Solana"
+            address={solana.address}
+            onConnect={solana.connect}
+            onDisconnect={solana.disconnect}
+            connecting={solana.connecting}
+            color="bg-[#9945FF]"
           />
         </div>
       </div>
@@ -1366,36 +1485,38 @@ function SpeedSection({
   onRefresh: () => void;
 }) {
   return (
-    <div className="mt-3 grid grid-cols-2 gap-2">
-      <SpeedTile
-        active={speed === "fast"}
-        onClick={() => onChange("fast")}
-        title="Fast"
-        subtitle="≈ seconds"
-        fee={fees?.fast}
-        loading={loading}
-        icon={<Zap className="size-3.5" />}
-      />
-      <SpeedTile
-        active={speed === "standard"}
-        onClick={() => onChange("standard")}
-        title="Standard"
-        subtitle="≈ 13–19 min"
-        fee={fees?.slow}
-        loading={loading}
-        trailing={
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onRefresh();
-            }}
-            title="Refetch Iris fees"
-            className="rounded-full p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-          >
-            <RefreshCw className={cn("size-3", loading && "animate-spin")} />
-          </button>
-        }
-      />
+    <div className="mt-3 space-y-2">
+      <div className="grid grid-cols-2 gap-2">
+        <SpeedTile
+          active={speed === "fast"}
+          onClick={() => onChange("fast")}
+          title="Fast"
+          subtitle="≈ seconds"
+          fee={fees?.fast}
+          loading={loading}
+          icon={<Zap className="size-3.5" />}
+        />
+        <SpeedTile
+          active={speed === "standard"}
+          onClick={() => onChange("standard")}
+          title="Standard"
+          subtitle="≈ 13–19 min"
+          fee={fees?.slow}
+          loading={loading}
+        />
+      </div>
+      <div className="flex justify-end">
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={loading}
+          title="Refetch Iris fees"
+          className="flex items-center gap-1 border border-border-strong bg-card-elevated px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-muted-foreground hover:bg-foreground hover:text-background disabled:opacity-60"
+        >
+          <RefreshCw className={cn("size-3", loading && "animate-spin")} />
+          Refresh fees
+        </button>
+      </div>
     </div>
   );
 }
@@ -1408,7 +1529,6 @@ function SpeedTile({
   fee,
   loading,
   icon,
-  trailing,
 }: {
   active: boolean;
   onClick: () => void;
@@ -1417,7 +1537,6 @@ function SpeedTile({
   fee: BurnFee | undefined;
   loading: boolean;
   icon?: React.ReactNode;
-  trailing?: React.ReactNode;
 }) {
   return (
     <motion.button
@@ -1446,7 +1565,6 @@ function SpeedTile({
           ) : (
             <span className="text-[10px] text-muted-foreground">—</span>
           )}
-          {trailing}
         </span>
       </div>
       <div className={cn("text-[11px]", active ? "text-primary-foreground/80" : "text-muted-foreground")}>{subtitle}</div>

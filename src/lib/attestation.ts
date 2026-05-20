@@ -86,16 +86,11 @@ export async function fetchBurnFees(
   signal?: AbortSignal,
 ): Promise<{ fast: BurnFee; slow: BurnFee }> {
   const url = `${irisApiUrl}/v2/burn/usdc/fees/${sourceDomain}/${destDomain}`;
-  // Use no-store cache mode so browser DevTools always shows the request.
-  console.log("[CCTP] GET", url);
   const res = await fetch(url, { signal, cache: "no-store" });
   let entries: IrisFeeEntry[] = [];
   if (res.ok) {
     const body: unknown = await res.json();
     entries = parseFeeEntries(body);
-    console.log("[CCTP] burn fees", { sourceDomain, destDomain, entries });
-  } else {
-    console.warn("[CCTP] burn fees fetch non-OK", res.status, res.statusText);
   }
   const fast =
     entries.find((e) => e.finalityThreshold === 1000) ??
@@ -200,14 +195,10 @@ export async function pollAttestation(
           opts?.onPoll?.(update);
           return complete;
         }
-      } else if (res.status !== 404) {
-        console.warn(
-          `pollAttestation: non-OK status ${res.status} for ${url}`,
-        );
       }
     } catch (err) {
       if (signal?.aborted) throw signal.reason ?? err;
-      console.warn("pollAttestation: fetch error", err);
+      // network blip — keep polling
     }
     opts?.onPoll?.(update);
     await delay(intervalMs, signal);

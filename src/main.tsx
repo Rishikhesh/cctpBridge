@@ -1,3 +1,7 @@
+// MUST be first import — sets up Node-style Buffer/global polyfills before
+// Solana SPL Token / Anchor / Stellar SDK modules evaluate at module top-level.
+import './polyfills'
+
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
