@@ -329,26 +329,66 @@ export async function solanaReceiveMessage(
     .remainingAccounts(remainingAccounts)
     .instruction();
 
+  // receive_message tx is account-heavy (~18 accounts + ~480-byte ix data) and
+  // can already approach Solana's 1232-byte legacy tx limit. ComputeBudget
+  // instructions would push us over. Default 200k CU is sufficient for
+  // receive_message (matches Circle's reference example which sets no budget).
   const tx = new Transaction().add(ix);
   const { blockhash, lastValidBlockHeight } =
     await programs.connection.getLatestBlockhash("confirmed");
   tx.recentBlockhash = blockhash;
   tx.feePayer = wallet.publicKey;
 
-  const phantom = getSolanaProvider();
-  if (!phantom) throw new Error("Solana wallet not available");
-  const { signature } = await phantom.signAndSendTransaction(tx);
-
-  // Wait for confirmation
-  const conf = await programs.connection.confirmTransaction(
-    { signature, blockhash, lastValidBlockHeight },
-    "confirmed",
-  );
-  if (conf.value.err) {
-    throw new Error(`Solana receive_message reverted: ${JSON.stringify(conf.value.err)}`);
+  // Pre-flight simulate — catches PDA mismatch, missing accounts, IDL drift
+  // BEFORE the user signs. Legacy Transaction overload doesn't accept options.
+  const sim = await programs.connection.simulateTransaction(tx);
+  if (sim.value.err) {
+    const logs = (sim.value.logs ?? []).join("\n");
+    throw new Error(
+      `[safety] Solana receive_message simulation failed: ${JSON.stringify(sim.value.err)}\n${logs}`,
+    );
   }
 
-  return { signature };
+  const phantom = getSolanaProvider();
+  if (!phantom) throw new Error("Solana wallet not available");
+  const { signature } = await phantom.signAndSendTransaction(tx, {
+    skipPreflight: false,
+    maxRetries: 5,
+  });
+
+  // Sanity: lastValidBlockHeight not actively used by getSignatureStatuses
+  // loop, but log it via the deadline check below so the value is read.
+  void lastValidBlockHeight;
+
+  // Manual long-poll of signature status. confirmTransaction({blockhash})
+  // bails the moment the blockhash window expires (~60s) even when the tx is
+  // still landing — that's the "block height exceeded" error users see.
+  // getSignatureStatuses tells us the truth: landed or not.
+  const deadline = Date.now() + 180_000; // 3 minutes
+  while (Date.now() < deadline) {
+    const { value } = await programs.connection.getSignatureStatuses(
+      [signature],
+      { searchTransactionHistory: true },
+    );
+    const st = value[0];
+    if (st) {
+      if (st.err) {
+        throw new Error(
+          `Solana receive_message reverted: ${JSON.stringify(st.err)}`,
+        );
+      }
+      if (
+        st.confirmationStatus === "confirmed" ||
+        st.confirmationStatus === "finalized"
+      ) {
+        return { signature };
+      }
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  throw new Error(
+    `Solana tx ${signature} not confirmed within 3 minutes. Check Solscan; it may still land.`,
+  );
 }
 
 export async function solanaUsdcBalance(

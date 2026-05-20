@@ -243,25 +243,43 @@ export async function callReceiveMessage(
 ): Promise<ReceiveMessageResult> {
   if (!chain.evm) throw new Error(`No EVM config for chain ${chain.name}`);
   await ensureOnChain(chain);
-  // Defense in depth: re-verify chainId right before submit so a half-completed
-  // wallet switch can never let a receiveMessage land on the wrong chain.
   const current = await evmChainId();
   if (current !== chain.evm.chainId) {
     throw new Error(
       `Wallet still on chain ${current}, expected ${chain.evm.chainId} (${chain.name}). Refusing to submit receiveMessage to wrong chain.`,
     );
   }
-  const wallet = walletClient();
+  await assertLiveAccount(account);
+
+  const pub = publicClient(chain.evm);
+  // Dry-run via simulate to catch reverts (wrong dest domain, replay, etc.)
+  await pub.simulateContract({
+    address: chain.evm.messageTransmitter,
+    abi: MESSAGE_TRANSMITTER_V2_ABI,
+    functionName: "receiveMessage",
+    args: [messageHex as Hex, attestationHex as Hex],
+    account,
+  });
+
   const data = encodeFunctionData({
     abi: MESSAGE_TRANSMITTER_V2_ABI,
     functionName: "receiveMessage",
     args: [messageHex as Hex, attestationHex as Hex],
   });
+
+  const gas = await estimateGasWithBuffer(pub, {
+    account,
+    to: chain.evm.messageTransmitter,
+    data,
+  });
+
+  const wallet = walletClient();
   const hash = await wallet.sendTransaction({
     account,
     chain: null,
     to: chain.evm.messageTransmitter,
     data,
+    gas,
   });
   return { txHash: hash };
 }
@@ -314,19 +332,8 @@ export async function evmApproveUsdc(
   if (!chain.evm) throw new Error(`No EVM config for chain ${chain.name}`);
   await ensureOnChain(chain);
   if (amount <= 0n) throw new Error(`[safety] approve amount must be > 0`);
+  await assertLiveAccount(account);
 
-  // Verify wallet still on the expected account (no mid-flow account switch).
-  const accounts = (await ensureProvider().request({
-    method: "eth_accounts",
-  })) as string[];
-  const live = accounts?.[0]?.toLowerCase();
-  if (!live || live !== account.toLowerCase()) {
-    throw new Error(
-      `[safety] EVM wallet account mismatch: expected ${account}, got ${live ?? "none"}. Aborting.`,
-    );
-  }
-
-  // Dry-run simulation to catch reverts before the user signs.
   const pub = publicClient(chain.evm);
   await pub.simulateContract({
     address: chain.evm.usdc,
@@ -336,18 +343,57 @@ export async function evmApproveUsdc(
     account,
   });
 
-  const wallet = walletClient();
   const data = encodeFunctionData({
     abi: ERC20_ABI,
     functionName: "approve",
     args: [chain.evm.tokenMessenger, amount],
   });
+
+  const gas = await estimateGasWithBuffer(pub, {
+    account,
+    to: chain.evm.usdc,
+    data,
+  });
+
+  const wallet = walletClient();
   return wallet.sendTransaction({
     account,
     chain: null,
     to: chain.evm.usdc,
     data,
+    gas,
   });
+}
+
+async function assertLiveAccount(expected: Address) {
+  const accounts = (await ensureProvider().request({
+    method: "eth_accounts",
+  })) as string[];
+  const live = accounts?.[0]?.toLowerCase();
+  if (!live || live !== expected.toLowerCase()) {
+    throw new Error(
+      `[safety] EVM wallet account mismatch: expected ${expected}, got ${live ?? "none"}. Aborting.`,
+    );
+  }
+}
+
+async function estimateGasWithBuffer(
+  pub: PublicClient,
+  args: { account: Address; to: Address; data: Hex },
+): Promise<bigint> {
+  try {
+    const est = await pub.estimateGas({
+      account: args.account,
+      to: args.to,
+      data: args.data,
+    });
+    // 25% buffer to absorb chain congestion + state shifts between sim and send.
+    return (est * 125n) / 100n;
+  } catch {
+    // If estimateGas fails (some chains require state context the public RPC
+    // lacks), let the wallet estimate. Safer than guessing wrong.
+    return 0n;
+  }
 }
 
 export interface EvmDepositForBurnArgs {
@@ -369,7 +415,6 @@ export async function evmDepositForBurn(
   if (!chain.evm) throw new Error(`No EVM config for chain ${chain.name}`);
   await ensureOnChain(chain);
 
-  // Hard invariants — fund-safety asserts. Throw before sign.
   if (args.amount <= 0n) throw new Error(`[safety] burn amount must be > 0`);
   if (args.maxFee < 0n) throw new Error(`[safety] maxFee must be >= 0`);
   if (args.maxFee > args.amount)
@@ -389,16 +434,7 @@ export async function evmDepositForBurn(
   if (args.hookData && !/^0x[0-9a-fA-F]*$/.test(args.hookData))
     throw new Error(`[safety] hookData not hex`);
 
-  // Confirm wallet account stable.
-  const accounts = (await ensureProvider().request({
-    method: "eth_accounts",
-  })) as string[];
-  const live = accounts?.[0]?.toLowerCase();
-  if (!live || live !== account.toLowerCase()) {
-    throw new Error(
-      `[safety] EVM wallet account mismatch: expected ${account}, got ${live ?? "none"}. Aborting burn.`,
-    );
-  }
+  await assertLiveAccount(account);
 
   // Dry-run via simulate to catch onchain reverts (allowance, fee schedule, etc.).
   const pub = publicClient(chain.evm);
@@ -437,7 +473,6 @@ export async function evmDepositForBurn(
     });
   }
 
-  const wallet = walletClient();
   const data = args.hookData
     ? encodeFunctionData({
         abi: TOKEN_MESSENGER_V2_ABI,
@@ -466,13 +501,21 @@ export async function evmDepositForBurn(
           args.minFinalityThreshold,
         ],
       });
+
+  const gas = await estimateGasWithBuffer(pub, {
+    account,
+    to: chain.evm.tokenMessenger,
+    data,
+  });
+
+  const wallet = walletClient();
   return wallet.sendTransaction({
     account,
     chain: null,
     to: chain.evm.tokenMessenger,
     data,
+    gas,
   });
 }
 
-// Export sanity helpers used by bridge.ts
 export { assertEvmRecipient, assertBytes32, ZERO_ADDRESS, ZERO_BYTES32 };

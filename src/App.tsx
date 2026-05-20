@@ -63,7 +63,8 @@ import { useWallet } from "@/hooks/useWallet";
 import { useEvmWallet } from "@/hooks/useEvmWallet";
 import { useSolanaWallet } from "@/hooks/useSolanaWallet";
 import { isValidSolanaAddress, solanaReceiveMessage } from "@/lib/solana";
-import { PublicKey as SolanaPublicKey } from "@solana/web3.js";
+import { PublicKey as SolanaPublicKey, Connection as SolanaConnection } from "@solana/web3.js";
+import { getAssociatedTokenAddress } from "@solana/spl-token";
 import { ChainPicker, TokenChip } from "@/components/ChainPicker";
 import { ChainLogo } from "@/components/ChainLogo";
 import {
@@ -552,11 +553,26 @@ function App() {
         if (toChain.domainId !== 5)
           throw new Error(`[safety] Solana domain must be 5, got ${toChain.domainId}`);
 
-        // Mint recipient on Solana is the recipient's 32-byte pubkey
+        // CCTP V2 on Solana: mintRecipient encoded in the burn message is the
+        // recipient's USDC **associated token account (ATA)** — NOT the wallet
+        // pubkey. The Solana program asserts `userTokenAccount == mintRecipient`.
         const recipientPk = new SolanaPublicKey(recipient);
-        const mintRecipientBytes32 = `0x${recipientPk.toBuffer().toString("hex")}` as `0x${string}`;
+        const usdcMintPk = new SolanaPublicKey(toChain.solana.usdcMint);
+        const recipientAta = await getAssociatedTokenAddress(usdcMintPk, recipientPk);
+        const mintRecipientBytes32 = `0x${recipientAta.toBuffer().toString("hex")}` as `0x${string}`;
         if (mintRecipientBytes32.length !== 66)
           throw new Error(`[safety] Solana mintRecipient not bytes32`);
+
+        // ATA must exist BEFORE burn — receive_message does not create it.
+        // Burning into a non-existent ATA leaves attestation unredeemable
+        // until the user (or anyone) creates the ATA. Verify now and abort.
+        const solConn = new SolanaConnection(toChain.solana.rpcUrl, "confirmed");
+        const ataInfo = await solConn.getAccountInfo(recipientAta);
+        if (!ataInfo) {
+          throw new Error(
+            `[safety] Recipient ${recipient} has no USDC associated token account on Solana (${recipientAta.toBase58()}). Send any USDC to ${recipient} once to create it, then retry.`,
+          );
+        }
 
         // Approve if needed
         setProgress((p) => ({ ...p, phase: "approving" }));

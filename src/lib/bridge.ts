@@ -62,21 +62,37 @@ async function submitContractCall(
 ): Promise<string> {
   const config = CCTP_CONFIGS[network];
   const server = new rpc.Server(config.sorobanRpcUrl, { allowHttp: false });
-  const account = await server.getAccount(sender);
+
+  // Confirm RPC reachable + on the expected network before signing.
+  const health = await server.getHealth().catch((e) => {
+    throw new Error(`[safety] Soroban RPC unreachable: ${e instanceof Error ? e.message : String(e)}`);
+  });
+  if (health.status !== "healthy") {
+    throw new Error(`[safety] Soroban RPC not healthy: ${health.status}`);
+  }
+
+  const account = await server.getAccount(sender).catch((e) => {
+    throw new Error(
+      `[safety] Stellar account ${sender} not found on ${network}. ${e instanceof Error ? e.message : ""}`,
+    );
+  });
   const contract = new Contract(contractId);
+
   const tx = new TransactionBuilder(account, {
-    fee: "10000000",
+    fee: "10000000", // 1 XLM ceiling — Soroban will charge resource fee from sim
     networkPassphrase: config.networkPassphrase,
   })
     .addOperation(contract.call(method, ...args))
-    .setTimeout(180)
+    .setTimeout(300)
     .build();
 
   const sim = await server.simulateTransaction(tx);
   if (rpc.Api.isSimulationError(sim)) {
-    throw new Error(`Simulation failed: ${sim.error}`);
+    throw new Error(`[safety] Soroban simulation failed: ${sim.error}`);
   }
+  // assembleTransaction injects resource fee + footprint from simulation.
   const prepared = rpc.assembleTransaction(tx, sim).build();
+
   const signedXdr = await signXdr(
     network,
     prepared.toXDR(),
@@ -84,24 +100,46 @@ async function submitContractCall(
     sender,
   );
   const signed = TransactionBuilder.fromXDR(signedXdr, config.networkPassphrase);
-  const sendResult = await server.sendTransaction(signed as any);
+  // Refuse to submit if the signed tx's network passphrase differs from ours.
+  if (signed.networkPassphrase !== config.networkPassphrase) {
+    throw new Error(
+      `[safety] Signed tx network mismatch: signed=${signed.networkPassphrase} expected=${config.networkPassphrase}`,
+    );
+  }
+
+  const sendResult = await server.sendTransaction(signed as never);
   if (sendResult.status === "ERROR") {
     throw new Error(`Send failed: ${JSON.stringify(sendResult.errorResult)}`);
   }
+  if (!sendResult.hash) {
+    throw new Error(`[safety] Soroban sendTransaction returned no hash`);
+  }
 
-  let getResult = await server.getTransaction(sendResult.hash);
+  // Poll getTransaction with backoff; tolerate transient NOT_FOUND.
   const start = Date.now();
-  while (getResult.status === "NOT_FOUND") {
-    if (Date.now() - start > 120_000) {
-      throw new Error("Tx confirmation timeout");
+  const TIMEOUT_MS = 180_000;
+  while (true) {
+    if (Date.now() - start > TIMEOUT_MS) {
+      throw new Error(
+        `Tx confirmation timeout after ${TIMEOUT_MS / 1000}s. Hash: ${sendResult.hash}`,
+      );
     }
-    await new Promise((r) => setTimeout(r, 2000));
-    getResult = await server.getTransaction(sendResult.hash);
+    let getResult;
+    try {
+      getResult = await server.getTransaction(sendResult.hash);
+    } catch {
+      await new Promise((r) => setTimeout(r, 2500));
+      continue;
+    }
+    if (getResult.status === "NOT_FOUND") {
+      await new Promise((r) => setTimeout(r, 2000));
+      continue;
+    }
+    if (getResult.status === "SUCCESS") return sendResult.hash;
+    throw new Error(
+      `Tx failed: ${getResult.status} hash=${sendResult.hash} result=${JSON.stringify(getResult)}`,
+    );
   }
-  if (getResult.status !== "SUCCESS") {
-    throw new Error(`Tx failed: ${getResult.status}`);
-  }
-  return sendResult.hash;
 }
 
 export async function mintAndForwardOnStellar(

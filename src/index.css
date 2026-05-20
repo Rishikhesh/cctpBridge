@@ -61,7 +61,7 @@ html[data-theme="dark"] {
   --color-muted-foreground: var(--color-text-muted);
   --color-accent-foreground: var(--color-text);
   --color-destructive: var(--color-accent);
-  --color-destructive-foreground: var(--color-accent-ink);
+  --color-destructive-foreground: #f3f1ec;
   --color-success: #2a8e4a;
   --color-warning: #c98a00;
   --color-input: var(--color-bg);
