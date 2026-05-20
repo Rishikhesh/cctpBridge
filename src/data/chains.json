@@ -1,0 +1,239 @@
+{
+  "$schema": "Catalog of CCTP V2 chains. Add new chains here only. cctp.ts wraps these into ChainInfo at runtime.",
+  "irisApi": {
+    "mainnet": "https://iris-api.circle.com",
+    "testnet": "https://iris-api-sandbox.circle.com"
+  },
+  "evmV2Contracts": {
+    "mainnet": {
+      "tokenMessenger": "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d",
+      "messageTransmitter": "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64"
+    },
+    "testnet": {
+      "tokenMessenger": "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA",
+      "messageTransmitter": "0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275"
+    }
+  },
+  "stellar": {
+    "mainnet": {
+      "id": "stellar-mainnet",
+      "name": "Stellar",
+      "shortName": "XLM",
+      "domainId": 27,
+      "color": "#000000",
+      "logoChar": "★",
+      "supportedSource": true,
+      "networkPassphrase": "Public Global Stellar Network ; September 2015",
+      "sorobanRpcUrl": "https://mainnet.sorobanrpc.com",
+      "horizonUrl": "https://horizon.stellar.org",
+      "explorerTxBase": "https://stellar.expert/explorer/public/tx/",
+      "contracts": {
+        "tokenMessengerMinter": "CAE2G5Z77UP7GYPYGFOWFGW7C7J6I4YP2AFGSADRKQY62SYUFLPNFTXL",
+        "messageTransmitter": "CACMENFFJPJMSDAJQLX4R7K3SFZIW2LJSE3R2UMLGSWHFHS353FVXAZV",
+        "cctpForwarder": "CBZL2IH7F6BIDAA3WBNXYKIXSATJGMSW7K5P5MJ6STX5RXN47TZJDF5T",
+        "usdcContract": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75",
+        "usdcIssuer": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+      }
+    },
+    "testnet": {
+      "id": "stellar-testnet",
+      "name": "Stellar",
+      "shortName": "XLM",
+      "domainId": 27,
+      "color": "#000000",
+      "logoChar": "★",
+      "supportedSource": true,
+      "networkPassphrase": "Test SDF Network ; September 2015",
+      "sorobanRpcUrl": "https://soroban-testnet.stellar.org",
+      "horizonUrl": "https://horizon-testnet.stellar.org",
+      "explorerTxBase": "https://stellar.expert/explorer/testnet/tx/",
+      "contracts": {
+        "tokenMessengerMinter": "CDNG7HXAPBWICI2E3AUBP3YZWZELJLYSB6F5CC7WLDTLTHVM74SLRTHP",
+        "messageTransmitter": "CBJ6MTCKKZG73PMDZCJMSFRD7DQEMI4FKDH7CGDSV4W6FHCRBCQAVVJY",
+        "cctpForwarder": "CA66Q2WFBND6V4UEB7RD4SAXSVIWMD6RA4X3U32ELVFGXV5PJK4T4VSZ",
+        "usdcContract": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+        "usdcIssuer": "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5"
+      }
+    }
+  },
+  "evm": {
+    "mainnet": [
+      {
+        "id": "ethereum-mainnet",
+        "name": "Ethereum",
+        "shortName": "ETH",
+        "domainId": 0,
+        "color": "#627EEA",
+        "logoChar": "Ξ",
+        "chainId": 1,
+        "nativeSymbol": "ETH",
+        "rpcUrl": "https://ethereum-rpc.publicnode.com",
+        "usdc": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "explorerTxBase": "https://etherscan.io/tx/"
+      },
+      {
+        "id": "base-mainnet",
+        "name": "Base",
+        "shortName": "BASE",
+        "domainId": 6,
+        "color": "#0052FF",
+        "logoChar": "B",
+        "chainId": 8453,
+        "nativeSymbol": "ETH",
+        "rpcUrl": "https://base-rpc.publicnode.com",
+        "usdc": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "explorerTxBase": "https://basescan.org/tx/"
+      },
+      {
+        "id": "arbitrum-mainnet",
+        "name": "Arbitrum",
+        "shortName": "ARB",
+        "domainId": 3,
+        "color": "#28A0F0",
+        "logoChar": "AR",
+        "chainId": 42161,
+        "nativeSymbol": "ETH",
+        "rpcUrl": "https://arbitrum.drpc.org",
+        "usdc": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+        "explorerTxBase": "https://arbiscan.io/tx/"
+      },
+      {
+        "id": "avalanche-mainnet",
+        "name": "Avalanche",
+        "shortName": "AVAX",
+        "domainId": 1,
+        "color": "#E84142",
+        "logoChar": "AV",
+        "chainId": 43114,
+        "nativeSymbol": "AVAX",
+        "rpcUrl": "https://avalanche.api.onfinality.io/public/ext/bc/C/rpc",
+        "usdc": "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E",
+        "explorerTxBase": "https://snowtrace.io/tx/"
+      },
+      {
+        "id": "polygon-mainnet",
+        "name": "Polygon",
+        "shortName": "POL",
+        "domainId": 7,
+        "color": "#8247E5",
+        "logoChar": "P",
+        "chainId": 137,
+        "nativeSymbol": "POL",
+        "rpcUrl": "https://rpc.private.mev-x.com/polygon",
+        "usdc": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+        "explorerTxBase": "https://polygonscan.com/tx/"
+      },
+      {
+        "id": "bnb-mainnet",
+        "name": "BNB Chain",
+        "shortName": "BNB",
+        "domainId": 17,
+        "color": "#F0B90B",
+        "logoChar": "BN",
+        "chainId": 56,
+        "nativeSymbol": "BNB",
+        "rpcUrl": "https://bsc.rpc.blxrbdn.com",
+        "usdc": "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
+        "explorerTxBase": "https://bscscan.com/tx/"
+      }
+    ],
+    "testnet": [
+      {
+        "id": "ethereum-sepolia",
+        "name": "Ethereum Sepolia",
+        "shortName": "ETH",
+        "domainId": 0,
+        "color": "#627EEA",
+        "logoChar": "Ξ",
+        "chainId": 11155111,
+        "nativeSymbol": "ETH",
+        "rpcUrl": "https://ethereum-sepolia-rpc.publicnode.com",
+        "usdc": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
+        "explorerTxBase": "https://sepolia.etherscan.io/tx/"
+      },
+      {
+        "id": "base-sepolia",
+        "name": "Base Sepolia",
+        "shortName": "BASE",
+        "domainId": 6,
+        "color": "#0052FF",
+        "logoChar": "B",
+        "chainId": 84532,
+        "nativeSymbol": "ETH",
+        "rpcUrl": "https://base-sepolia-rpc.publicnode.com",
+        "usdc": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+        "explorerTxBase": "https://sepolia.basescan.org/tx/"
+      },
+      {
+        "id": "arbitrum-sepolia",
+        "name": "Arbitrum Sepolia",
+        "shortName": "ARB",
+        "domainId": 3,
+        "color": "#28A0F0",
+        "logoChar": "AR",
+        "chainId": 421614,
+        "nativeSymbol": "ETH",
+        "rpcUrl": "https://arbitrum-sepolia.drpc.org",
+        "usdc": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+        "explorerTxBase": "https://sepolia.arbiscan.io/tx/"
+      },
+      {
+        "id": "avalanche-fuji",
+        "name": "Avalanche Fuji",
+        "shortName": "AVAX",
+        "domainId": 1,
+        "color": "#E84142",
+        "logoChar": "AV",
+        "chainId": 43113,
+        "nativeSymbol": "AVAX",
+        "rpcUrl": "https://avalanche-fuji-c-chain-rpc.publicnode.com",
+        "usdc": "0x5425890298aed601595a70AB815c96711a31Bc65",
+        "explorerTxBase": "https://testnet.snowtrace.io/tx/"
+      },
+      {
+        "id": "polygon-amoy",
+        "name": "Polygon Amoy",
+        "shortName": "POL",
+        "domainId": 7,
+        "color": "#8247E5",
+        "logoChar": "P",
+        "chainId": 80002,
+        "nativeSymbol": "POL",
+        "rpcUrl": "https://polygon-amoy-bor-rpc.publicnode.com",
+        "usdc": "0x41E94Eb019C0762f9Bfcf9Fb1E58725BfB0e7582",
+        "explorerTxBase": "https://amoy.polygonscan.com/tx/"
+      }
+    ]
+  },
+  "solana": {
+    "mainnet": {
+      "id": "solana-mainnet",
+      "name": "Solana",
+      "shortName": "SOL",
+      "domainId": 5,
+      "color": "#9945FF",
+      "logoChar": "◎",
+      "supportedSource": false,
+      "rpcUrl": "https://api.mainnet-beta.solana.com",
+      "usdcMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "tokenMessenger": "CCTPV2vPZJS2u2BBsUoscuikbYjnpFmbFsvVuJdgUMQe",
+      "messageTransmitter": "CCTPV2Sm4AdWt5296sk4P66VBZ7bEhcARwFaaS9YPbeC",
+      "explorerTxBase": "https://solscan.io/tx/"
+    },
+    "testnet": {
+      "id": "solana-devnet",
+      "name": "Solana Devnet",
+      "shortName": "SOL",
+      "domainId": 5,
+      "color": "#9945FF",
+      "logoChar": "◎",
+      "supportedSource": false,
+      "rpcUrl": "https://api.devnet.solana.com",
+      "usdcMint": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+      "tokenMessenger": "CCTPV2vPZJS2u2BBsUoscuikbYjnpFmbFsvVuJdgUMQe",
+      "messageTransmitter": "CCTPV2Sm4AdWt5296sk4P66VBZ7bEhcARwFaaS9YPbeC",
+      "explorerTxBase": "https://solscan.io/tx/",
+      "explorerTxSuffix": "?cluster=devnet"
+    }
+  }
+}
