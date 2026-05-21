@@ -16,7 +16,9 @@ import {
 import { Modal } from "@/components/Modal";
 import { StellarWalletPicker } from "@/components/StellarWalletPicker";
 import { EvmWalletPicker } from "@/components/EvmWalletPicker";
-import { HistoryModal } from "@/components/HistoryModal";
+import { HistoryListPage } from "@/pages/HistoryListPage";
+import { HistoryDetailPage, type RetryStep } from "@/pages/HistoryDetailPage";
+import { useNavigate, useLocation } from "react-router-dom";
 import { useTxHistory } from "@/hooks/useTxHistory";
 import {
   newHistoryId,
@@ -24,7 +26,7 @@ import {
   type HistoryPhase,
 } from "@/lib/history";
 import { useTheme } from "@/hooks/useTheme";
-import { Moon, Sun } from "lucide-react";
+import { ArrowLeftRight, Clock, FileText, Moon, Sun } from "lucide-react";
 import {
   CCTP_CONFIGS,
   STELLAR_DOMAIN_ID,
@@ -201,12 +203,19 @@ function App() {
   const [progress, setProgress] = useState<ProgressState>(INIT_PROGRESS);
   const [progressOpen, setProgressOpen] = useState(false);
   const [contractsOpen, setContractsOpen] = useState(false);
-  const [historyOpen, setHistoryOpen] = useState(false);
   const [swapKick, setSwapKick] = useState(0);
   const [addingTrustline, setAddingTrustline] = useState(false);
   const txHistory = useTxHistory();
   const txIdRef = useRef<string | null>(null);
   const pollAbort = useRef<AbortController | null>(null);
+  const [retryingStep, setRetryingStep] = useState<RetryStep | null>(null);
+
+  // Routing — view selection.
+  const location = useLocation();
+  const navigate = useNavigate();
+  const isHistoryListRoute = location.pathname === "/history";
+  const isHistoryDetailRoute = location.pathname.startsWith("/history/") && location.pathname !== "/history/";
+  const isBridgeRoute = !isHistoryListRoute && !isHistoryDetailRoute;
 
   // Wallet address per chain kind. Single source of truth for both source
   // and destination resolution — keeps Recipient locked to a connected wallet.
@@ -699,10 +708,121 @@ function App() {
         toShort: t?.shortName,
         error: entry.error,
       });
-      setHistoryOpen(false);
       setProgressOpen(true);
     },
     [network, setNetwork],
+  );
+
+  // Retries a specific step from a stored history entry. Each step is safe
+  // to replay onchain: CCTP rejects already-used nonces, EVM approve is
+  // idempotent (overwrites allowance), attestation polling has no side
+  // effects. Resume routes through handleResumeFromHistory first to hydrate
+  // local state, then triggers the right primitive.
+  const handleRetryFromStep = useCallback(
+    async (entry: HistoryEntry, step: RetryStep) => {
+      setRetryingStep(step);
+      try {
+        // Always hydrate state from the saved entry first.
+        await handleResumeFromHistory(entry);
+        navigate("/");
+        if (step === "mint") {
+          // executed by Resume's restored state + the existing retry button —
+          // but to avoid the extra click we run it now.
+          if (!entry.attestationMessage || !entry.attestationHex) {
+            throw new Error("Missing attestation — cannot retry mint");
+          }
+          const list = chainsFor(entry.network);
+          const dest = list.find((c) => c.id === entry.toChainId);
+          const src = list.find((c) => c.id === entry.fromChainId);
+          if (!dest || !src) throw new Error("Chain catalog mismatch");
+          setBridging(true);
+          setProgressOpen(true);
+          try {
+            await executeMintStep({
+              dir: entry.direction,
+              destChain: dest,
+              srcChain: src,
+              recipientAddr: entry.recipient,
+              attestation: {
+                status: "complete",
+                message: entry.attestationMessage,
+                attestation: entry.attestationHex,
+              },
+            });
+          } finally {
+            setBridging(false);
+          }
+          return;
+        }
+        if (step === "attest") {
+          if (!entry.burnTx) throw new Error("Missing burn tx — cannot poll attestation");
+          const list = chainsFor(entry.network);
+          const src = list.find((c) => c.id === entry.fromChainId);
+          const dest = list.find((c) => c.id === entry.toChainId);
+          if (!src || !dest) throw new Error("Chain catalog mismatch");
+          setBridging(true);
+          setProgressOpen(true);
+          try {
+            const controller = new AbortController();
+            pollAbort.current = controller;
+            const cfg = CCTP_CONFIGS[entry.network];
+            setProgress((p) => ({
+              ...p,
+              phase: "attesting",
+              attestStartedAt: Date.now(),
+              etaSeconds: cctpEtaSeconds(src.domainId, entry.speed === "fast" ? 1000 : 2000),
+            }));
+            const attestation = await pollAttestation(
+              cfg.irisApiUrl,
+              src.domainId,
+              entry.burnTx,
+              {
+                signal: controller.signal,
+                onPoll: (u) =>
+                  setProgress((p) => ({
+                    ...p,
+                    pollAttempts: u.attempt,
+                    irisStatus: u.status,
+                    finalityThresholdExecuted: u.finalityThresholdExecuted,
+                    feeExecutedSubunits: u.feeExecuted,
+                  })),
+              },
+            );
+            setProgress((p) => ({ ...p, attestation, phase: "minting" }));
+            await executeMintStep({
+              dir: entry.direction,
+              destChain: dest,
+              srcChain: src,
+              recipientAddr: entry.recipient,
+              attestation,
+            });
+          } finally {
+            setBridging(false);
+          }
+          return;
+        }
+        // For "approve" or "burn" retries: re-running the full flow from
+        // the top is the safest path. The bridge flow checks allowance
+        // before approving (so approve is skipped if already set) and the
+        // user re-signs the burn. CCTP nonces prevent any duplicate effect.
+        if (step === "approve" || step === "burn") {
+          // Re-trigger full bridge — handleBridge owns the start logic.
+          // User will be re-prompted for signing.
+          await handleBridge();
+          return;
+        }
+      } catch (e) {
+        setProgress((p) => ({
+          ...p,
+          phase: "error",
+          error: formatError(e, `Retry from ${step} failed`),
+        }));
+      } finally {
+        setRetryingStep(null);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [handleResumeFromHistory, navigate, executeMintStep],
   );
 
   const handleRetryMint = useCallback(async () => {
@@ -1246,12 +1366,36 @@ function App() {
         evm={evmWallet}
         solana={solanaWallet}
         onContracts={() => setContractsOpen(true)}
-        onHistory={() => setHistoryOpen(true)}
+        onHistory={() => navigate("/history")}
+        onBridge={() => navigate("/")}
         historyCount={txHistory.list.length}
+        currentPath={location.pathname}
         theme={themeCtl}
       />
 
-      <main className="mx-auto max-w-6xl px-5 pb-10 pt-4">
+      {isHistoryListRoute ? (
+        <HistoryListPage
+          entries={txHistory.list}
+          onRemove={txHistory.remove}
+          onClear={txHistory.clear}
+        />
+      ) : null}
+
+      {isHistoryDetailRoute ? (
+        <HistoryDetailPage
+          entries={txHistory.list}
+          onRemove={txHistory.remove}
+          onRetryFromStep={handleRetryFromStep}
+          retryingStep={retryingStep}
+        />
+      ) : null}
+
+      <main
+        className={cn(
+          "mx-auto max-w-6xl px-5 pb-10 pt-4",
+          !isBridgeRoute && "hidden",
+        )}
+      >
         <AnimatePresence>
           {stellarWallet.error ? (
             <motion.div
@@ -1575,14 +1719,6 @@ function App() {
         error={evmWallet.error}
       />
 
-      <HistoryModal
-        open={historyOpen}
-        onClose={() => setHistoryOpen(false)}
-        history={txHistory.list}
-        onRemove={txHistory.remove}
-        onClear={txHistory.clear}
-        onResume={handleResumeFromHistory}
-      />
     </div>
   );
 }
@@ -1621,7 +1757,9 @@ function Header({
   solana,
   onContracts,
   onHistory,
+  onBridge,
   historyCount,
+  currentPath,
   theme,
 }: {
   network: StellarNetwork;
@@ -1631,49 +1769,60 @@ function Header({
   solana: ReturnType<typeof useSolanaWallet>;
   onContracts: () => void;
   onHistory: () => void;
+  onBridge: () => void;
   historyCount: number;
+  currentPath: string;
   theme: ReturnType<typeof useTheme>;
 }) {
+  const isBridge = currentPath === "/";
+  const isHistory = currentPath.startsWith("/history");
   return (
     <header className="sticky top-0 z-40 border-b-2 border-foreground bg-background">
-      <div className="mx-auto flex max-w-6xl items-stretch justify-between gap-0 px-5">
-        <div className="flex items-center gap-3 border-r border-border-strong py-3 pr-4">
-          <div className="grid size-8 place-items-center bg-primary font-black text-primary-foreground">
-            +
+      <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-5 py-3">
+        {/* Brand + primary nav */}
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2.5 border-r border-border-strong pr-4">
+            <div className="grid size-8 place-items-center bg-primary font-black text-primary-foreground">
+              +
+            </div>
+            <div className="leading-none">
+              <div className="font-display text-xl">CCTP Bridge</div>
+              <div className="eyebrow mt-0.5">Circle · V2</div>
+            </div>
           </div>
-          <div className="leading-none">
-            <div className="font-display text-2xl">CCTP Bridge</div>
-            <div className="eyebrow mt-0.5">Circle · V2</div>
-          </div>
+          <nav className="flex border border-foreground">
+            <NavTab
+              active={isBridge}
+              onClick={onBridge}
+              icon={<ArrowLeftRight className="size-3.5" />}
+            >
+              Bridge
+            </NavTab>
+            <NavTab
+              active={isHistory}
+              onClick={onHistory}
+              badge={historyCount}
+              icon={<Clock className="size-3.5" />}
+            >
+              Transfers
+            </NavTab>
+          </nav>
         </div>
-        <div className="flex flex-1 items-center justify-end gap-2 py-3">
-          <div className="flex border border-foreground">
-            <NetTab active={network === "testnet"} onClick={() => onNetworkChange("testnet")}>
-              Test
-            </NetTab>
-            <NetTab active={network === "mainnet"} onClick={() => onNetworkChange("mainnet")}>
-              Main
-            </NetTab>
-          </div>
+
+        {/* Settings + wallets */}
+        <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={onHistory}
-            className="flex items-center gap-1 border border-border-strong px-3 py-1.5 text-[11px] font-bold uppercase tracking-wide text-muted-foreground hover:bg-foreground hover:text-background"
-            title="Recent transfers"
+            onClick={() => onNetworkChange(network === "mainnet" ? "testnet" : "mainnet")}
+            title={`Switch to ${network === "mainnet" ? "Testnet" : "Mainnet"}`}
+            className={cn(
+              "border px-2.5 py-1.5 font-mono text-[10px] font-bold uppercase tracking-wider transition-colors",
+              network === "mainnet"
+                ? "border-foreground bg-card-elevated text-foreground hover:bg-foreground hover:text-background"
+                : "border-warning bg-warning/20 text-warning hover:bg-warning hover:text-background",
+            )}
           >
-            History
-            {historyCount > 0 ? (
-              <span className="bg-primary px-1 font-mono text-[9px] text-primary-foreground">
-                {historyCount}
-              </span>
-            ) : null}
-          </button>
-          <button
-            type="button"
-            onClick={onContracts}
-            className="hidden border border-border-strong px-3 py-1.5 text-[11px] font-bold uppercase tracking-wide text-muted-foreground hover:bg-foreground hover:text-background sm:inline-block"
-          >
-            Refs
+            {network === "mainnet" ? "Main" : "Test"}
           </button>
           <button
             type="button"
@@ -1687,6 +1836,16 @@ function Header({
               <Moon className="size-3.5" />
             )}
           </button>
+          <button
+            type="button"
+            onClick={onContracts}
+            title="CCTP contracts"
+            className="border border-border-strong p-2 text-muted-foreground hover:bg-foreground hover:text-background"
+          >
+            <FileText className="size-3.5" />
+          </button>
+          <div className="h-6 w-px bg-border-strong" />
+          <div className="flex items-center gap-1.5">
           <WalletPill
             connected={!!stellar.address}
             label="Stellar"
@@ -1714,32 +1873,49 @@ function Header({
             connecting={solana.connecting}
             color="bg-[#9945FF]"
           />
+          </div>
         </div>
       </div>
     </header>
   );
 }
 
-function NetTab({
+function NavTab({
   active,
   onClick,
   children,
+  badge,
+  icon,
 }: {
   active: boolean;
   onClick: () => void;
   children: React.ReactNode;
+  badge?: number;
+  icon?: React.ReactNode;
 }) {
   return (
     <button
       onClick={onClick}
+      title={String(children)}
       className={cn(
-        "px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors",
+        "flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-bold uppercase tracking-wide transition-colors",
         active
           ? "bg-foreground text-background"
-          : "bg-background text-muted-foreground hover:text-foreground",
+          : "bg-background text-muted-foreground hover:bg-accent hover:text-foreground",
       )}
     >
+      {icon}
       {children}
+      {badge && badge > 0 ? (
+        <span
+          className={cn(
+            "px-1 font-mono text-[9px]",
+            active ? "bg-background text-foreground" : "bg-primary text-primary-foreground",
+          )}
+        >
+          {badge}
+        </span>
+      ) : null}
     </button>
   );
 }
@@ -1763,12 +1939,15 @@ function WalletPill({
 }) {
   if (connected && address) {
     return (
-      <div className="flex items-center gap-1.5 border border-border-strong px-2.5 py-1.5 text-sm">
+      <div
+        className="flex items-center gap-1.5 border border-border-strong bg-card-elevated px-2 py-1"
+        title={`${label} · ${address}`}
+      >
         <span className={cn("size-1.5", color)} />
-        <span className="hidden text-[10px] font-bold uppercase tracking-wider text-muted-foreground sm:inline">
+        <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
           {label}
         </span>
-        <span className="font-mono text-xs">{shortAddr(address, 4, 4)}</span>
+        <span className="font-mono text-[11px]">{shortAddr(address, 4, 4)}</span>
         <button
           onClick={onDisconnect}
           title={`Disconnect ${label}`}
@@ -1784,10 +1963,15 @@ function WalletPill({
       type="button"
       onClick={onConnect}
       disabled={connecting}
-      className="flex items-center gap-1.5 border border-foreground px-3 py-1.5 text-[11px] font-bold uppercase tracking-wider hover:bg-foreground hover:text-background disabled:opacity-50"
+      title={`Connect ${label}`}
+      className="flex items-center gap-1.5 border border-foreground bg-background px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider hover:bg-foreground hover:text-background disabled:opacity-50"
     >
-      {connecting ? <Loader2 className="size-3.5 animate-spin" /> : <Wallet className="size-3.5" />}
-      <span className="hidden sm:inline">{label}</span>
+      {connecting ? (
+        <Loader2 className="size-3 animate-spin" />
+      ) : (
+        <Wallet className="size-3" />
+      )}
+      {label}
     </button>
   );
 }
@@ -2022,30 +2206,29 @@ function RecipientSection({
           {value}
         </div>
       ) : (
-        <button
-          type="button"
-          onClick={onConnect}
-          disabled={connecting}
-          className="flex w-full items-center justify-center gap-2 border-2 border-foreground bg-foreground py-2 text-[11px] font-bold uppercase tracking-wider text-background hover:bg-accent hover:text-accent-foreground disabled:opacity-60"
-        >
-          {connecting ? (
-            <Loader2 className="size-3.5 animate-spin" />
-          ) : (
-            <Wallet className="size-3.5" />
-          )}
-          Connect {chain.name} wallet to receive
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onConnect}
+            disabled={connecting}
+            className="flex flex-1 items-center justify-center gap-2 border-2 border-foreground bg-foreground py-2 text-[11px] font-bold uppercase tracking-wider text-background hover:bg-accent hover:text-accent-foreground disabled:opacity-60"
+          >
+            {connecting ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <Wallet className="size-3.5" />
+            )}
+            Connect {chain.name} wallet
+          </button>
+          <button
+            type="button"
+            onClick={() => onToggleCustom(true)}
+            className="shrink-0 border border-border-strong bg-card-elevated px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-muted-foreground hover:bg-foreground hover:text-background"
+          >
+            Enter manually →
+          </button>
+        </div>
       )}
-
-      {!isCustom && !walletConnected ? (
-        <button
-          type="button"
-          onClick={() => onToggleCustom(true)}
-          className="mt-2 w-full text-center text-[10px] font-bold uppercase tracking-wider text-muted-foreground hover:text-foreground"
-        >
-          or enter address manually →
-        </button>
-      ) : null}
     </div>
   );
 }
