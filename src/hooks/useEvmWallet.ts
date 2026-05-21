@@ -166,6 +166,14 @@ export function useEvmWallet() {
         "WalletConnect disabled — set VITE_WALLETCONNECT_PROJECT_ID in .env.local",
       );
     }
+    // WalletConnect v2 has a page-singleton Core. Refuse to pair a second WC
+    // session while another (Stellar) is live — they'd collide on storage +
+    // relay subscriptions. Recommend a browser wallet for the other chain.
+    if (localStorage.getItem("cctp:stellarWalletId") === "wallet_connect") {
+      throw new Error(
+        "Disconnect your Stellar WalletConnect session first. WalletConnect can only run one chain at a time per page. Use a browser wallet for the other chain to use both at once.",
+      );
+    }
     const p = await getWcEvmProvider();
     setActiveEvmProvider(
       p as unknown as InjectedEvmProvider,
@@ -253,7 +261,11 @@ export function useEvmWallet() {
     cleanupRef.current = null;
     setActiveEvmProvider(null, null);
     setAddress(null);
+    setChainId(null);
     setProviderKind(null);
+    setError(null);
+    setConnecting(false);
+    setPickerOpen(false);
     localStorage.removeItem(KEY_ADDR);
     localStorage.removeItem(KEY_KIND);
   }, [providerKind]);
@@ -284,14 +296,7 @@ function readInjectedRaw(): InjectedEvmProvider | null {
   return w.ethereum as InjectedEvmProvider;
 }
 
+import { formatError as stringifyErrShared } from "@/lib/utils";
 function stringifyErr(e: unknown): string {
-  if (!e) return "Unknown error";
-  if (e instanceof Error) return e.message;
-  if (typeof e === "string") return e;
-  if (typeof e === "object") {
-    const obj = e as Record<string, unknown>;
-    const m = obj.message ?? obj.error ?? obj.shortMessage;
-    if (typeof m === "string") return m;
-  }
-  return String(e);
+  return stringifyErrShared(e);
 }

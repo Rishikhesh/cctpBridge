@@ -6,6 +6,7 @@ import {
   solanaDisconnect,
   solanaSilentConnect,
 } from "@/lib/solana";
+import { formatError } from "@/lib/utils";
 
 const KEY = "cctp:solanaAddress";
 
@@ -55,7 +56,7 @@ export function useSolanaWallet() {
       setAddress(a);
       localStorage.setItem(KEY, a);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(formatError(e));
     } finally {
       setConnecting(false);
     }
@@ -68,6 +69,8 @@ export function useSolanaWallet() {
       // ignore
     }
     setAddress(null);
+    setError(null);
+    setConnecting(false);
     localStorage.removeItem(KEY);
   }, []);
 

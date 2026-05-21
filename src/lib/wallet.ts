@@ -6,7 +6,6 @@ import {
 import { defaultModules } from "@creit.tech/stellar-wallets-kit/modules/utils";
 import { FREIGHTER_ID } from "@creit.tech/stellar-wallets-kit/modules/freighter";
 import {
-  WalletConnectAllowedMethods,
   WalletConnectModule,
   WalletConnectTargetChain,
 } from "@creit.tech/stellar-wallets-kit/modules/wallet-connect";
@@ -110,6 +109,19 @@ export async function selectWallet(
   network: StellarNetwork,
   walletId: string,
 ): Promise<ConnectedWallet> {
+  // WalletConnect v2 Core is a page-level singleton. Two SignClients (one
+  // for Stellar, one for EVM) cause session-topic drops + "already
+  // initialized" warnings, and clobber each other's storage. Refuse to pair
+  // a Stellar WC session while an EVM WC session is live.
+  if (
+    walletId === "wallet_connect" &&
+    typeof localStorage !== "undefined" &&
+    localStorage.getItem("cctp:evmKind") === "walletconnect"
+  ) {
+    throw new Error(
+      "Disconnect your EVM WalletConnect session first. WalletConnect can only run one chain at a time per page. Use Freighter or a browser EVM wallet to keep both connected.",
+    );
+  }
   ensureInit(network);
   StellarWalletsKit.setWallet(walletId);
   // fetchAddress runs the module's actual handshake (e.g. WalletConnect QR
@@ -128,6 +140,14 @@ export async function disconnectWallet(): Promise<void> {
   } catch {
     // ignore
   }
+  // Reset the kit's active module back to the default so a subsequent
+  // reconnect doesn't accidentally route through the previously-paired
+  // module (e.g. WalletConnect session that's still cached internally).
+  try {
+    StellarWalletsKit.setWallet(FREIGHTER_ID);
+  } catch {
+    // ignore
+  }
 }
 
 export async function getConnectedAddress(
@@ -142,6 +162,39 @@ export async function getConnectedAddress(
   }
 }
 
+/**
+ * Forcibly select a wallet module by id (e.g. on session restore so the kit
+ * knows we previously paired via WalletConnect / LOBSTR / xBull and not the
+ * default Freighter — otherwise signing routes through the wrong module and
+ * fails with "Freighter is not connected").
+ */
+export function setActiveWalletId(network: StellarNetwork, walletId: string): void {
+  ensureInit(network);
+  StellarWalletsKit.setWallet(walletId);
+}
+
+function isStaleWcSessionError(e: unknown): boolean {
+  const s = e instanceof Error ? e.message : typeof e === "string" ? e : "";
+  return /session topic does not exist|No matching key/i.test(s);
+}
+
+async function purgeStaleWcSession(): Promise<void> {
+  // Wipe any cached WC sign-client session data on this origin so the next
+  // connect rebuilds cleanly. Safe — only touches WC keys.
+  try {
+    await StellarWalletsKit.disconnect();
+  } catch {
+    // ignore
+  }
+  if (typeof localStorage !== "undefined") {
+    for (const key of Object.keys(localStorage)) {
+      if (key.startsWith("wc@2") || key.startsWith("WALLETCONNECT_")) {
+        localStorage.removeItem(key);
+      }
+    }
+  }
+}
+
 export async function signXdr(
   network: StellarNetwork,
   xdr: string,
@@ -149,14 +202,21 @@ export async function signXdr(
   address: string,
 ): Promise<string> {
   ensureInit(network);
-  const { signedTxXdr } = await StellarWalletsKit.signTransaction(xdr, {
-    networkPassphrase,
-    address,
-  });
-  return signedTxXdr;
+  try {
+    const { signedTxXdr } = await StellarWalletsKit.signTransaction(xdr, {
+      networkPassphrase,
+      address,
+    });
+    return signedTxXdr;
+  } catch (e) {
+    if (isStaleWcSessionError(e)) {
+      await purgeStaleWcSession();
+      throw new Error(
+        "Your WalletConnect session expired. Disconnect Stellar wallet and reconnect to continue.",
+      );
+    }
+    throw e;
+  }
 }
 
 export const WALLETCONNECT_ENABLED = WC_PROJECT_ID.length > 0;
-
-// Keep export so other code that flipped imports still resolves; never used now.
-void WalletConnectAllowedMethods;

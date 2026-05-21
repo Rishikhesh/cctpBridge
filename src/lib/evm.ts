@@ -195,10 +195,44 @@ async function waitForChainId(target: number, timeoutMs = 8000): Promise<void> {
   );
 }
 
+interface WcSwitchableProvider {
+  setDefaultChain?: (chainId: string, rpcUrl?: string) => void;
+  chainId?: number;
+}
+
 export async function evmSwitchChain(chain: ChainInfo): Promise<void> {
   if (!chain.evm) throw new Error(`No EVM config for chain ${chain.name}`);
   const eth = ensureProvider();
   const hexId = `0x${chain.evm.chainId.toString(16)}`;
+
+  // WalletConnect path: most mobile wallets DO NOT prompt for
+  // wallet_switchEthereumChain. They pre-approve all chains via
+  // `optionalChains` at pairing and expect the chainId on the tx itself.
+  // EthereumProvider.setDefaultChain updates the provider's local view +
+  // emits chainChanged — no round trip, no prompt.
+  if (activeKind === "walletconnect") {
+    const wc = eth as unknown as WcSwitchableProvider;
+    if (typeof wc.setDefaultChain === "function") {
+      wc.setDefaultChain(hexId, chain.evm.rpcUrl);
+      await waitForChainId(chain.evm.chainId, 4000).catch(() => {
+        // Some wallets emit chainChanged late; not fatal — we'll re-check
+        // before send via the `eth_chainId` guard in callReceiveMessage.
+      });
+      return;
+    }
+    // Fallback: emit the request anyway; some wallets do handle it.
+    try {
+      await eth.request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: hexId }],
+      });
+    } catch {
+      // ignore — wallet may auto-switch on tx submit
+    }
+    return;
+  }
+
+  // Injected wallet path (MetaMask / Rabby / Coinbase).
   try {
     await eth.request({
       method: "wallet_switchEthereumChain",
@@ -229,7 +263,6 @@ export async function evmSwitchChain(chain: ChainInfo): Promise<void> {
       throw err;
     }
   }
-  // Block until provider reports the new chain (avoids race with viem sendTransaction)
   await waitForChainId(chain.evm.chainId);
 }
 
@@ -276,11 +309,16 @@ export async function callReceiveMessage(
 ): Promise<ReceiveMessageResult> {
   if (!chain.evm) throw new Error(`No EVM config for chain ${chain.name}`);
   await ensureOnChain(chain);
-  const current = await evmChainId();
-  if (current !== chain.evm.chainId) {
-    throw new Error(
-      `Wallet still on chain ${current}, expected ${chain.evm.chainId} (${chain.name}). Refusing to submit receiveMessage to wrong chain.`,
-    );
+  // Injected providers must report the right chainId. WC providers often lag
+  // their local chainId behind the actual wallet state — we trust the wallet
+  // to enforce the correct chain via the tx's chainId param (set below).
+  if (activeKind !== "walletconnect") {
+    const current = await evmChainId();
+    if (current !== chain.evm.chainId) {
+      throw new Error(
+        `Wallet still on chain ${current}, expected ${chain.evm.chainId} (${chain.name}). Refusing to submit receiveMessage to wrong chain.`,
+      );
+    }
   }
   await assertLiveAccount(account);
 

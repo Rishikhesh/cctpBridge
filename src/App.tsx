@@ -61,7 +61,14 @@ import {
   isValidStellarRecipient,
   stellarRecipientKind,
 } from "@/lib/stellar-utils";
-import { cn, formatUsdc, formatUsdcFixed, parseUsdc, shortAddr } from "@/lib/utils";
+import {
+  cn,
+  formatError,
+  formatUsdc,
+  formatUsdcFixed,
+  parseUsdc,
+  shortAddr,
+} from "@/lib/utils";
 import { useWallet } from "@/hooks/useWallet";
 import { useEvmWallet } from "@/hooks/useEvmWallet";
 import { useSolanaWallet } from "@/hooks/useSolanaWallet";
@@ -232,12 +239,20 @@ function App() {
     [evmWallet.connecting, stellarWallet.connecting, solanaWallet.connecting],
   );
 
-  // Recipient is ALWAYS the destination wallet's connected address. Paste
-  // disabled — funds can only flow to a wallet the user can prove control of
-  // (required to call receiveMessage / mint_and_forward on dest).
+  // Recipient defaults to the destination wallet's connected address. User
+  // can opt-in to manual entry via `useCustomRecipient`. Manual entry still
+  // runs all pre-burn safety checks (EVM zero, Stellar trustline, Solana ATA).
+  const [useCustomRecipient, setUseCustomRecipient] = useState(false);
+
   useEffect(() => {
+    if (useCustomRecipient) return;
     setRecipient(walletAddressFor(toChain.kind) ?? "");
-  }, [toChain.id, toChain.kind, walletAddressFor]);
+  }, [toChain.id, toChain.kind, walletAddressFor, useCustomRecipient]);
+
+  // Reset to wallet-locked mode whenever the destination chain changes.
+  useEffect(() => {
+    setUseCustomRecipient(false);
+  }, [toChain.id]);
 
   // Source balance loader
   const loadStellarBalance = useCallback(async () => {
@@ -380,6 +395,45 @@ function App() {
     pollAbort.current = null;
     setProgress(INIT_PROGRESS);
   };
+
+  /** Wipes all in-flight bridge state. Called when any wallet disconnects so
+   * a previous half-flow can't bleed into a new connection. */
+  const resetBridgeState = useCallback(() => {
+    pollAbort.current?.abort();
+    pollAbort.current = null;
+    setProgress(INIT_PROGRESS);
+    setProgressOpen(false);
+    setAmount("");
+    setRecipient("");
+    setStellarBalances(null);
+    setEvmBalance(null);
+  }, []);
+
+  // Reset bridge state whenever any wallet flips from connected → disconnected.
+  const prevConnectedRef = useRef({
+    stellar: !!stellarWallet.address,
+    evm: !!evmWallet.address,
+    solana: !!solanaWallet.address,
+  });
+  useEffect(() => {
+    const cur = {
+      stellar: !!stellarWallet.address,
+      evm: !!evmWallet.address,
+      solana: !!solanaWallet.address,
+    };
+    const prev = prevConnectedRef.current;
+    const droppedAny =
+      (prev.stellar && !cur.stellar) ||
+      (prev.evm && !cur.evm) ||
+      (prev.solana && !cur.solana);
+    if (droppedAny) resetBridgeState();
+    prevConnectedRef.current = cur;
+  }, [
+    stellarWallet.address,
+    evmWallet.address,
+    solanaWallet.address,
+    resetBridgeState,
+  ]);
 
   // === Bridge flows ===
 
@@ -797,7 +851,7 @@ function App() {
       if (fromChain.kind === "stellar") loadStellarBalance();
       if (fromChain.kind === "evm") loadEvmBalance();
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = formatError(e, "Transfer failed");
       setProgress((p) => ({ ...p, phase: "error", error: msg }));
     } finally {
       setBridging(false);
@@ -995,6 +1049,15 @@ function App() {
             value={recipient}
             onConnect={() => connectWalletFor(toChain.kind)}
             connecting={connectingWalletFor(toChain.kind)}
+            walletAddress={walletAddressFor(toChain.kind)}
+            isCustom={useCustomRecipient}
+            onToggleCustom={(v) => {
+              setUseCustomRecipient(v);
+              if (!v) setRecipient(walletAddressFor(toChain.kind) ?? "");
+              else setRecipient("");
+            }}
+            onChange={setRecipient}
+            invalid={recipientInvalid}
           />
         </Section>
 
@@ -1167,7 +1230,9 @@ function App() {
         open={stellarWallet.pickerOpen}
         network={network}
         onClose={stellarWallet.closePicker}
-        onConnected={(addr) => stellarWallet.handleConnected(addr)}
+        onConnected={(addr, walletId) =>
+          stellarWallet.handleConnected(addr, walletId)
+        }
       />
 
       <EvmWalletPicker
@@ -1519,27 +1584,85 @@ function RecipientSection({
   value,
   onConnect,
   connecting,
+  walletAddress,
+  isCustom,
+  onToggleCustom,
+  onChange,
+  invalid,
 }: {
   chain: ChainInfo;
   value: string;
   onConnect: () => Promise<void>;
   connecting: boolean;
+  walletAddress: string | null;
+  isCustom: boolean;
+  onToggleCustom: (v: boolean) => void;
+  onChange: (v: string) => void;
+  invalid?: boolean;
 }) {
-  const connected = !!value;
+  const walletConnected = !!walletAddress;
+  const placeholder =
+    chain.kind === "evm" ? "0x…" : chain.kind === "solana" ? "Base58 pubkey" : "G…, C…, or M…";
+
   return (
-    <div className="border border-border-strong bg-card p-3">
+    <div
+      className={cn(
+        "border border-border-strong bg-card p-3",
+        invalid && "border-destructive",
+      )}
+    >
       <div className="mb-1.5 flex items-center justify-between">
         <span className="eyebrow flex items-center gap-1.5">
           <ChainLogo chain={chain} size={12} />
           {chain.kind} address · {chain.name}
         </span>
-        {connected ? (
-          <span className="font-mono text-[10px] text-muted-foreground">
-            Locked from wallet
-          </span>
-        ) : null}
+        <div className="flex items-center gap-2">
+          {isCustom ? (
+            <span className="font-mono text-[10px] text-warning">
+              ⚠ custom address
+            </span>
+          ) : walletConnected ? (
+            <span className="font-mono text-[10px] text-muted-foreground">
+              Locked from wallet
+            </span>
+          ) : null}
+          {walletConnected || isCustom ? (
+            <button
+              type="button"
+              onClick={() => onToggleCustom(!isCustom)}
+              className="border border-border-strong bg-card-elevated px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider hover:bg-foreground hover:text-background"
+            >
+              {isCustom ? "Use my wallet" : "Use other address"}
+            </button>
+          ) : null}
+        </div>
       </div>
-      {connected ? (
+
+      {isCustom ? (
+        <>
+          <input
+            spellCheck={false}
+            autoFocus
+            placeholder={placeholder}
+            value={value}
+            onChange={(e) => onChange(e.target.value.trim())}
+            className={cn(
+              "w-full bg-transparent font-mono text-sm outline-none placeholder:text-muted-foreground/40",
+              invalid && "text-destructive",
+            )}
+          />
+          {invalid ? (
+            <p className="mt-1 text-[11px] text-destructive">
+              Invalid {chain.kind.toUpperCase()} address.
+            </p>
+          ) : null}
+          <p className="mt-1.5 text-[10px] text-muted-foreground">
+            Funds will mint to this address on {chain.name}. Double-check —
+            CCTP burns are irreversible. We still verify ATA / trustline
+            before burn, but you own this risk.
+          </p>
+        </>
+      ) : walletConnected ? (
         <div className="break-all font-mono text-sm" title={value}>
           {value}
         </div>
@@ -1558,6 +1681,16 @@ function RecipientSection({
           Connect {chain.name} wallet to receive
         </button>
       )}
+
+      {!isCustom && !walletConnected ? (
+        <button
+          type="button"
+          onClick={() => onToggleCustom(true)}
+          className="mt-2 w-full text-center text-[10px] font-bold uppercase tracking-wider text-muted-foreground hover:text-foreground"
+        >
+          or enter address manually →
+        </button>
+      ) : null}
     </div>
   );
 }

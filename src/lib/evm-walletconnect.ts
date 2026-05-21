@@ -19,6 +19,23 @@ function evmChainList(): ChainInfo[] {
   return [...CHAINS_MAINNET, ...CHAINS_TESTNET].filter((c) => c.kind === "evm");
 }
 
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) =>
+      setTimeout(
+        () =>
+          reject(
+            new Error(
+              `${label} timed out after ${ms}ms. Disconnect and try again — back-to-back WalletConnect inits can hang on the relay.`,
+            ),
+          ),
+        ms,
+      ),
+    ),
+  ]);
+}
+
 export async function getWcEvmProvider(): Promise<
   Awaited<ReturnType<typeof EthereumProvider.init>>
 > {
@@ -42,11 +59,14 @@ export async function getWcEvmProvider(): Promise<
   // without re-pairing.
   const [primary, ...optional] = allChainIds;
 
-  G.__cctpWcEthInit = EthereumProvider.init({
+  const initPromise = EthereumProvider.init({
     projectId: PROJECT_ID,
     chains: [primary],
     optionalChains: optional,
     rpcMap,
+    // AppKit modal is fine because we enforce one WC session at a time at
+    // the app level (see selectWallet / connectWalletConnect gates) —
+    // the AppKit singleton never has two consumers concurrently.
     showQrModal: true,
     methods: [
       "eth_sendTransaction",
@@ -67,10 +87,20 @@ export async function getWcEvmProvider(): Promise<
           : "",
       ],
     },
-  }).then((p) => {
-    G.__cctpWcEthProvider = p;
-    return p;
   });
+
+  // Wrap with timeout so a stalled init never hangs the UI forever.
+  // On timeout we clear the cached promise so the next click retries cleanly.
+  G.__cctpWcEthInit = withTimeout(initPromise, 20000, "WalletConnect init")
+    .then((p) => {
+      G.__cctpWcEthProvider = p;
+      return p;
+    })
+    .catch((err) => {
+      G.__cctpWcEthInit = undefined;
+      G.__cctpWcEthProvider = undefined;
+      throw err;
+    });
 
   return G.__cctpWcEthInit;
 }
@@ -82,7 +112,19 @@ export async function getWcEvmProvider(): Promise<
 export async function wcEvmConnect(): Promise<string> {
   const p = await getWcEvmProvider();
   if (!p.session) {
-    await p.connect();
+    try {
+      await withTimeout(p.connect(), 5 * 60 * 1000, "WalletConnect pairing");
+    } catch (err) {
+      // Drop cached provider on failure so retry starts fresh.
+      G.__cctpWcEthProvider = undefined;
+      G.__cctpWcEthInit = undefined;
+      try {
+        await p.disconnect();
+      } catch {
+        // ignore
+      }
+      throw err;
+    }
   }
   const accounts = (await p.request({ method: "eth_accounts" })) as string[];
   if (!accounts || accounts.length === 0) {
@@ -98,6 +140,10 @@ export async function wcEvmDisconnect(): Promise<void> {
   } catch {
     // ignore
   }
+  // Drop the cached singleton so the next connect builds a fresh provider
+  // with a brand-new pairing topic — avoids any leftover relay/session state.
+  G.__cctpWcEthProvider = undefined;
+  G.__cctpWcEthInit = undefined;
 }
 
 export function wcEvmHasSession(): boolean {
