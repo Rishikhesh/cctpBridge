@@ -18,7 +18,7 @@
     "mainnet": {
       "id": "stellar-mainnet",
       "name": "Stellar",
-      "shortName": "XLM",
+      "shortName": "STELLAR",
       "domainId": 27,
       "color": "#000000",
       "logoChar": "★",
@@ -38,7 +38,7 @@
     "testnet": {
       "id": "stellar-testnet",
       "name": "Stellar",
-      "shortName": "XLM",
+      "shortName": "STELLAR",
       "domainId": 27,
       "color": "#000000",
       "logoChar": "★",

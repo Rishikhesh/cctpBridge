@@ -16,6 +16,13 @@ import {
 import { Modal } from "@/components/Modal";
 import { StellarWalletPicker } from "@/components/StellarWalletPicker";
 import { EvmWalletPicker } from "@/components/EvmWalletPicker";
+import { HistoryModal } from "@/components/HistoryModal";
+import { useTxHistory } from "@/hooks/useTxHistory";
+import {
+  newHistoryId,
+  type HistoryEntry,
+  type HistoryPhase,
+} from "@/lib/history";
 import { useTheme } from "@/hooks/useTheme";
 import { Moon, Sun } from "lucide-react";
 import {
@@ -194,8 +201,11 @@ function App() {
   const [progress, setProgress] = useState<ProgressState>(INIT_PROGRESS);
   const [progressOpen, setProgressOpen] = useState(false);
   const [contractsOpen, setContractsOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [swapKick, setSwapKick] = useState(0);
   const [addingTrustline, setAddingTrustline] = useState(false);
+  const txHistory = useTxHistory();
+  const txIdRef = useRef<string | null>(null);
   const pollAbort = useRef<AbortController | null>(null);
 
   // Wallet address per chain kind. Single source of truth for both source
@@ -404,7 +414,38 @@ function App() {
     pollAbort.current?.abort();
     pollAbort.current = null;
     setProgress(INIT_PROGRESS);
+    txIdRef.current = null;
   };
+
+  // Mirror in-flight progress into history whenever it changes.
+  useEffect(() => {
+    const id = txIdRef.current;
+    if (!id) return;
+    if (!progress.fromName || !progress.toName) return;
+    const existing = txHistory.list.find((e) => e.id === id);
+    if (!existing) return;
+    txHistory.upsert({
+      ...existing,
+      phase: progress.phase as HistoryPhase,
+      approveTx: progress.approveTx,
+      burnTx: progress.burnTx,
+      mintTx: progress.mintTx,
+      attestationMessage: progress.attestation?.message,
+      attestationHex: progress.attestation?.attestation,
+      error: progress.error,
+      updatedAt: Date.now(),
+    });
+  }, [
+    progress.phase,
+    progress.approveTx,
+    progress.burnTx,
+    progress.mintTx,
+    progress.attestation,
+    progress.error,
+    progress.fromName,
+    progress.toName,
+    txHistory,
+  ]);
 
   /** Wipes all in-flight bridge state. Called when any wallet disconnects so
    * a previous half-flow can't bleed into a new connection. */
@@ -619,6 +660,51 @@ function App() {
     );
   }, [progress.attestation, progress.burnTx, progress.mintTx, bridging, direction]);
 
+  // Restores a previous transfer's burn + attestation into local state so
+  // user can re-attempt the mint. Picks chains/recipient/network from the
+  // saved entry so the rest of the UI is consistent during retry.
+  const handleResumeFromHistory = useCallback(
+    async (entry: HistoryEntry) => {
+      if (!entry.attestationMessage || !entry.attestationHex) return;
+      if (entry.network !== network) {
+        await setNetwork(entry.network);
+      }
+      // Reseat chain pickers if needed.
+      const list = chainsFor(entry.network);
+      const f = list.find((c) => c.id === entry.fromChainId);
+      const t = list.find((c) => c.id === entry.toChainId);
+      if (f) setFromChain(f);
+      if (t) setToChain(t);
+      setRecipient(entry.recipient);
+      setSpeed(entry.speed);
+      setAmount(entry.sendAmount);
+      // Restore in-flight progress so retry-mint can run.
+      txIdRef.current = entry.id;
+      setProgress({
+        ...INIT_PROGRESS,
+        phase: entry.phase === "done" ? "done" : "minting",
+        approveTx: entry.approveTx,
+        burnTx: entry.burnTx,
+        mintTx: entry.mintTx,
+        attestation: {
+          status: "complete",
+          message: entry.attestationMessage,
+          attestation: entry.attestationHex,
+        },
+        sendAmount: entry.sendAmount,
+        receiveAmount: entry.receiveAmount,
+        fromName: f?.name,
+        toName: t?.name,
+        fromShort: f?.shortName,
+        toShort: t?.shortName,
+        error: entry.error,
+      });
+      setHistoryOpen(false);
+      setProgressOpen(true);
+    },
+    [network, setNetwork],
+  );
+
   const handleRetryMint = useCallback(async () => {
     if (!progress.attestation || !direction) return;
     setBridging(true);
@@ -662,15 +748,36 @@ function App() {
       toChain.kind === "stellar"
         ? receiveAmount * 10n ** BigInt(USDC_DECIMALS_STELLAR - USDC_DECIMALS_CCTP)
         : receiveAmount;
-    setProgress((p) => ({
-      ...p,
+    const snapshot = {
       sendAmount: formatUsdc(parsedAmount, fromDecimals),
       receiveAmount: formatUsdc(destReceiveLocal, destDecimalsLocal),
       fromName: fromChain.name,
       toName: toChain.name,
       fromShort: fromChain.shortName,
       toShort: toChain.shortName,
-    }));
+    };
+    setProgress((p) => ({ ...p, ...snapshot }));
+
+    // Open a new history entry for this transfer.
+    const id = newHistoryId();
+    txIdRef.current = id;
+    const senderAddr = walletAddressFor(fromChain.kind) ?? "";
+    const newEntry: HistoryEntry = {
+      id,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      direction,
+      fromChainId: fromChain.id,
+      toChainId: toChain.id,
+      network,
+      sendAmount: snapshot.sendAmount,
+      receiveAmount: snapshot.receiveAmount,
+      recipient,
+      sender: senderAddr,
+      speed,
+      phase: "idle",
+    };
+    txHistory.upsert(newEntry);
 
     try {
       if (direction === "stellar->evm") {
@@ -1139,6 +1246,8 @@ function App() {
         evm={evmWallet}
         solana={solanaWallet}
         onContracts={() => setContractsOpen(true)}
+        onHistory={() => setHistoryOpen(true)}
+        historyCount={txHistory.list.length}
         theme={themeCtl}
       />
 
@@ -1465,6 +1574,15 @@ function App() {
         connecting={evmWallet.connecting}
         error={evmWallet.error}
       />
+
+      <HistoryModal
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        history={txHistory.list}
+        onRemove={txHistory.remove}
+        onClear={txHistory.clear}
+        onResume={handleResumeFromHistory}
+      />
     </div>
   );
 }
@@ -1502,6 +1620,8 @@ function Header({
   evm,
   solana,
   onContracts,
+  onHistory,
+  historyCount,
   theme,
 }: {
   network: StellarNetwork;
@@ -1510,6 +1630,8 @@ function Header({
   evm: ReturnType<typeof useEvmWallet>;
   solana: ReturnType<typeof useSolanaWallet>;
   onContracts: () => void;
+  onHistory: () => void;
+  historyCount: number;
   theme: ReturnType<typeof useTheme>;
 }) {
   return (
@@ -1533,6 +1655,19 @@ function Header({
               Main
             </NetTab>
           </div>
+          <button
+            type="button"
+            onClick={onHistory}
+            className="flex items-center gap-1 border border-border-strong px-3 py-1.5 text-[11px] font-bold uppercase tracking-wide text-muted-foreground hover:bg-foreground hover:text-background"
+            title="Recent transfers"
+          >
+            History
+            {historyCount > 0 ? (
+              <span className="bg-primary px-1 font-mono text-[9px] text-primary-foreground">
+                {historyCount}
+              </span>
+            ) : null}
+          </button>
           <button
             type="button"
             onClick={onContracts}
