@@ -26,6 +26,7 @@ import {
   chainsFor,
   usdcForChain,
   type ChainInfo,
+  type ChainKind,
   type StellarNetwork,
 } from "@/lib/cctp";
 import {
@@ -179,25 +180,63 @@ function App() {
   const [swapKick, setSwapKick] = useState(0);
   const pollAbort = useRef<AbortController | null>(null);
 
-  // Auto-fill recipient = dest wallet address
-  useEffect(() => {
-    if (recipient) return;
-    if (toChain.kind === "evm" && evmWallet.address) setRecipient(evmWallet.address);
-    if (toChain.kind === "stellar" && stellarWallet.address)
-      setRecipient(stellarWallet.address);
-    if (toChain.kind === "solana" && solanaWallet.address)
-      setRecipient(solanaWallet.address);
-  }, [toChain.kind, evmWallet.address, stellarWallet.address, solanaWallet.address, recipient]);
+  // Wallet address per chain kind. Single source of truth for both source
+  // and destination resolution — keeps Recipient locked to a connected wallet.
+  const walletAddressFor = useCallback(
+    (kind: ChainKind): string | null => {
+      switch (kind) {
+        case "evm":
+          return evmWallet.address;
+        case "stellar":
+          return stellarWallet.address;
+        case "solana":
+          return solanaWallet.address;
+        default:
+          return null;
+      }
+    },
+    [evmWallet.address, stellarWallet.address, solanaWallet.address],
+  );
 
-  // Reset recipient on dest chain change
+  const connectWalletFor = useCallback(
+    async (kind: ChainKind): Promise<void> => {
+      switch (kind) {
+        case "evm":
+          await evmWallet.connect();
+          return;
+        case "stellar":
+          await stellarWallet.connect();
+          return;
+        case "solana":
+          await solanaWallet.connect();
+          return;
+      }
+    },
+    [evmWallet, stellarWallet, solanaWallet],
+  );
+
+  const connectingWalletFor = useCallback(
+    (kind: ChainKind): boolean => {
+      switch (kind) {
+        case "evm":
+          return evmWallet.connecting;
+        case "stellar":
+          return stellarWallet.connecting;
+        case "solana":
+          return solanaWallet.connecting;
+        default:
+          return false;
+      }
+    },
+    [evmWallet.connecting, stellarWallet.connecting, solanaWallet.connecting],
+  );
+
+  // Recipient is ALWAYS the destination wallet's connected address. Paste
+  // disabled — funds can only flow to a wallet the user can prove control of
+  // (required to call receiveMessage / mint_and_forward on dest).
   useEffect(() => {
-    if (toChain.kind === "evm" && evmWallet.address) setRecipient(evmWallet.address);
-    else if (toChain.kind === "stellar" && stellarWallet.address)
-      setRecipient(stellarWallet.address);
-    else if (toChain.kind === "solana" && solanaWallet.address)
-      setRecipient(solanaWallet.address);
-    else setRecipient("");
-  }, [toChain.id, evmWallet.address, stellarWallet.address, solanaWallet.address]);
+    setRecipient(walletAddressFor(toChain.kind) ?? "");
+  }, [toChain.id, toChain.kind, walletAddressFor]);
 
   // Source balance loader
   const loadStellarBalance = useCallback(async () => {
@@ -309,18 +348,8 @@ function App() {
     sourceBalanceRaw > 0n &&
     parsedAmount > sourceBalanceRaw;
 
-  const sourceWalletAddress =
-    fromChain.kind === "stellar"
-      ? stellarWallet.address
-      : fromChain.kind === "solana"
-        ? solanaWallet.address
-        : evmWallet.address;
-  const destWalletAddress =
-    toChain.kind === "stellar"
-      ? stellarWallet.address
-      : toChain.kind === "solana"
-        ? solanaWallet.address
-        : evmWallet.address;
+  const sourceWalletAddress = walletAddressFor(fromChain.kind);
+  const destWalletAddress = walletAddressFor(toChain.kind);
 
   const canBridge =
     supported &&
@@ -916,6 +945,8 @@ function App() {
             invalid={amountInvalid || insufficient}
             sourceAddress={sourceWalletAddress}
             walletConnected={!!sourceWalletAddress}
+            onConnectWallet={() => connectWalletFor(fromChain.kind)}
+            walletConnecting={connectingWalletFor(fromChain.kind)}
             kind="from"
           />
         </Section>
@@ -961,8 +992,8 @@ function App() {
           <RecipientSection
             chain={toChain}
             value={recipient}
-            onChange={setRecipient}
-            invalid={recipientInvalid}
+            onConnect={() => connectWalletFor(toChain.kind)}
+            connecting={connectingWalletFor(toChain.kind)}
           />
         </Section>
 
@@ -1345,6 +1376,8 @@ function ChainSection({
   invalid,
   sourceAddress,
   walletConnected,
+  onConnectWallet,
+  walletConnecting,
   readOnly,
   kind,
 }: {
@@ -1363,6 +1396,8 @@ function ChainSection({
   invalid?: boolean;
   sourceAddress?: string | null;
   walletConnected?: boolean;
+  onConnectWallet?: () => void | Promise<void>;
+  walletConnecting?: boolean;
   readOnly?: boolean;
   kind: "from" | "to";
 }) {
@@ -1405,34 +1440,50 @@ function ChainSection({
       <div className="mt-3 flex items-center justify-between border-t border-border pt-2 text-[11px] text-muted-foreground">
         <div className="flex items-center gap-1.5">
           {kind === "from" ? (
-            <span className="flex items-center gap-1.5">
-              <span className="eyebrow">Bal</span>
-              {balanceLoading ? (
-                <Skeleton className="h-3.5 w-16" />
-              ) : balanceDisplay !== null && balanceDisplay !== undefined ? (
-                <>
-                  <span className="font-mono text-foreground">{balanceDisplay}</span>
-                  <span className="font-mono">{tokenSymbol}</span>
-                </>
-              ) : walletConnected ? (
-                <>
-                  <span className="font-mono text-foreground">—</span>
-                  <span className="font-mono">{tokenSymbol}</span>
-                </>
-              ) : (
-                <span className="eyebrow normal-case tracking-normal">Connect wallet</span>
-              )}
-              {onRefreshBalance && walletConnected ? (
-                <button
-                  onClick={onRefreshBalance}
-                  title="Refresh balance"
-                  disabled={balanceLoading}
-                  className="ml-0.5 p-0.5 hover:text-foreground disabled:opacity-60"
-                >
-                  <RefreshCw className={cn("size-3", balanceLoading && "animate-spin")} />
-                </button>
-              ) : null}
-            </span>
+            walletConnected ? (
+              <span className="flex items-center gap-1.5">
+                <span className="eyebrow">Bal</span>
+                {balanceLoading ? (
+                  <Skeleton className="h-3.5 w-16" />
+                ) : balanceDisplay !== null && balanceDisplay !== undefined ? (
+                  <>
+                    <span className="font-mono text-foreground">{balanceDisplay}</span>
+                    <span className="font-mono">{tokenSymbol}</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="font-mono text-foreground">—</span>
+                    <span className="font-mono">{tokenSymbol}</span>
+                  </>
+                )}
+                {onRefreshBalance ? (
+                  <button
+                    onClick={onRefreshBalance}
+                    title="Refresh balance"
+                    disabled={balanceLoading}
+                    className="ml-0.5 p-0.5 hover:text-foreground disabled:opacity-60"
+                  >
+                    <RefreshCw className={cn("size-3", balanceLoading && "animate-spin")} />
+                  </button>
+                ) : null}
+              </span>
+            ) : onConnectWallet ? (
+              <button
+                type="button"
+                onClick={onConnectWallet}
+                disabled={!!walletConnecting}
+                className="flex items-center gap-1.5 border border-foreground bg-foreground px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-background hover:bg-accent hover:text-accent-foreground disabled:opacity-60"
+              >
+                {walletConnecting ? (
+                  <Loader2 className="size-3 animate-spin" />
+                ) : (
+                  <Wallet className="size-3" />
+                )}
+                Connect {chain.name} wallet
+              </button>
+            ) : (
+              <span className="eyebrow normal-case tracking-normal">Connect wallet</span>
+            )
           ) : (
             <span className="eyebrow">After fees</span>
           )}
@@ -1454,43 +1505,47 @@ function ChainSection({
 function RecipientSection({
   chain,
   value,
-  onChange,
-  invalid,
+  onConnect,
+  connecting,
 }: {
   chain: ChainInfo;
   value: string;
-  onChange: (v: string) => void;
-  invalid?: boolean;
+  onConnect: () => Promise<void>;
+  connecting: boolean;
 }) {
+  const connected = !!value;
   return (
-    <div className={cn("border border-border-strong bg-card p-3", invalid && "border-destructive")}>
+    <div className="border border-border-strong bg-card p-3">
       <div className="mb-1.5 flex items-center justify-between">
         <span className="eyebrow flex items-center gap-1.5">
           <ChainLogo chain={chain} size={12} />
           {chain.kind} address · {chain.name}
         </span>
+        {connected ? (
+          <span className="font-mono text-[10px] text-muted-foreground">
+            Locked from wallet
+          </span>
+        ) : null}
       </div>
-      <input
-        spellCheck={false}
-        placeholder={
-          chain.kind === "evm"
-            ? "0x…"
-            : chain.kind === "solana"
-              ? "Base58 pubkey"
-              : "G…, C…, or M…"
-        }
-        value={value}
-        onChange={(e) => onChange(e.target.value.trim())}
-        className={cn(
-          "w-full bg-transparent font-mono text-sm outline-none placeholder:text-muted-foreground/40",
-          invalid && "text-destructive",
-        )}
-      />
-      {invalid ? (
-        <p className="mt-1 text-[11px] text-destructive">
-          Invalid {chain.kind.toUpperCase()} address.
-        </p>
-      ) : null}
+      {connected ? (
+        <div className="break-all font-mono text-sm" title={value}>
+          {value}
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={onConnect}
+          disabled={connecting}
+          className="flex w-full items-center justify-center gap-2 border-2 border-foreground bg-foreground py-2 text-[11px] font-bold uppercase tracking-wider text-background hover:bg-accent hover:text-accent-foreground disabled:opacity-60"
+        >
+          {connecting ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : (
+            <Wallet className="size-3.5" />
+          )}
+          Connect {chain.name} wallet to receive
+        </button>
+      )}
     </div>
   );
 }
