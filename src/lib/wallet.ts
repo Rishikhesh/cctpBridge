@@ -109,18 +109,22 @@ export async function selectWallet(
   network: StellarNetwork,
   walletId: string,
 ): Promise<ConnectedWallet> {
-  // WalletConnect v2 Core is a page-level singleton. Two SignClients (one
-  // for Stellar, one for EVM) cause session-topic drops + "already
-  // initialized" warnings, and clobber each other's storage. Refuse to pair
-  // a Stellar WC session while an EVM WC session is live.
+  // WalletConnect v2 Core is page-singleton — two WC SignClients collide.
+  // Auto-disconnect the EVM WC session before pairing Stellar WC, and emit
+  // an event so useEvmWallet can clear its React state.
   if (
     walletId === "wallet_connect" &&
     typeof localStorage !== "undefined" &&
     localStorage.getItem("cctp:evmKind") === "walletconnect"
   ) {
-    throw new Error(
-      "Disconnect your EVM WalletConnect session first. WalletConnect can only run one chain at a time per page. Use Freighter or a browser EVM wallet to keep both connected.",
-    );
+    const { wcEvmDisconnect } = await import("./evm-walletconnect");
+    await wcEvmDisconnect();
+    localStorage.removeItem("cctp:evmAddress");
+    localStorage.removeItem("cctp:evmKind");
+    window.dispatchEvent(new Event("cctp:evm-force-disconnect"));
+    // Give WC Core a beat to fully release before a new WC SignClient
+    // claims its singleton seat.
+    await new Promise((r) => setTimeout(r, 300));
   }
   ensureInit(network);
   StellarWalletsKit.setWallet(walletId);

@@ -20,6 +20,20 @@ export function useWallet() {
   const [error, setError] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
 
+  // Listen for cross-wallet force-disconnect (fired when EVM WC auto-evicts
+  // the Stellar WC session because both can't run simultaneously).
+  useEffect(() => {
+    const onForce = () => {
+      setAddress(null);
+      setError(null);
+      setConnecting(false);
+      setPickerOpen(false);
+    };
+    window.addEventListener("cctp:stellar-force-disconnect", onForce);
+    return () =>
+      window.removeEventListener("cctp:stellar-force-disconnect", onForce);
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     const storedAddr = localStorage.getItem(ADDR_KEY);

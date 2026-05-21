@@ -75,6 +75,25 @@ export function useEvmWallet() {
     [],
   );
 
+  // Cross-wallet force-disconnect listener (Stellar WC pairing kicks us
+  // out so the WC singleton has a clean slate).
+  useEffect(() => {
+    const onForce = () => {
+      cleanupRef.current?.();
+      cleanupRef.current = null;
+      setActiveEvmProvider(null, null);
+      setAddress(null);
+      setChainId(null);
+      setProviderKind(null);
+      setError(null);
+      setConnecting(false);
+      setPickerOpen(false);
+    };
+    window.addEventListener("cctp:evm-force-disconnect", onForce);
+    return () =>
+      window.removeEventListener("cctp:evm-force-disconnect", onForce);
+  }, []);
+
   // Restore prior session on mount (injected reads `eth_accounts`,
   // WC restores via existing signClient session).
   useEffect(() => {
@@ -166,13 +185,16 @@ export function useEvmWallet() {
         "WalletConnect disabled — set VITE_WALLETCONNECT_PROJECT_ID in .env.local",
       );
     }
-    // WalletConnect v2 has a page-singleton Core. Refuse to pair a second WC
-    // session while another (Stellar) is live — they'd collide on storage +
-    // relay subscriptions. Recommend a browser wallet for the other chain.
+    // WalletConnect v2 Core is page-singleton — auto-disconnect the Stellar
+    // WC session before pairing EVM WC, and notify useWallet to clear its
+    // React state.
     if (localStorage.getItem("cctp:stellarWalletId") === "wallet_connect") {
-      throw new Error(
-        "Disconnect your Stellar WalletConnect session first. WalletConnect can only run one chain at a time per page. Use a browser wallet for the other chain to use both at once.",
-      );
+      const { disconnectWallet } = await import("@/lib/wallet");
+      await disconnectWallet();
+      localStorage.removeItem("cctp:address");
+      localStorage.removeItem("cctp:stellarWalletId");
+      window.dispatchEvent(new Event("cctp:stellar-force-disconnect"));
+      await new Promise((r) => setTimeout(r, 300));
     }
     const p = await getWcEvmProvider();
     setActiveEvmProvider(
