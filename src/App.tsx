@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { Modal } from "@/components/Modal";
 import { StellarWalletPicker } from "@/components/StellarWalletPicker";
+import { EvmWalletPicker } from "@/components/EvmWalletPicker";
 import { useTheme } from "@/hooks/useTheme";
 import { Moon, Sun } from "lucide-react";
 import {
@@ -1167,6 +1168,17 @@ function App() {
         network={network}
         onClose={stellarWallet.closePicker}
         onConnected={(addr) => stellarWallet.handleConnected(addr)}
+      />
+
+      <EvmWalletPicker
+        open={evmWallet.pickerOpen}
+        onClose={evmWallet.closePicker}
+        onPickInjected={evmWallet.pickInjected}
+        onPickWalletConnect={evmWallet.pickWalletConnect}
+        injectedAvailable={evmWallet.injectedAvailable}
+        wcAvailable={evmWallet.wcAvailable}
+        connecting={evmWallet.connecting}
+        error={evmWallet.error}
       />
     </div>
   );

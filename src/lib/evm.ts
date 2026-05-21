@@ -27,21 +27,47 @@ function assertBytes32(hex: string, label: string) {
   }
 }
 
-// EIP-1193 provider shape we rely on. We don't redeclare `window.ethereum`
-// globally because @reown/appkit / @walletconnect already augment it with a
-// looser type. Instead we cast through this interface where needed.
-interface InjectedEvmProvider {
+// EIP-1193 provider shape we rely on. Both `window.ethereum` (MetaMask /
+// injected) and WalletConnect's EthereumProvider implement this surface.
+export interface InjectedEvmProvider {
   request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
   on?: (event: string, cb: (...args: unknown[]) => void) => void;
   removeListener?: (event: string, cb: (...args: unknown[]) => void) => void;
   isMetaMask?: boolean;
 }
 
-function readEthereum(): InjectedEvmProvider | null {
+export type EvmProviderKind = "injected" | "walletconnect";
+
+// Active provider for the current session. Swap via setActiveEvmProvider.
+let activeProvider: InjectedEvmProvider | null = null;
+let activeKind: EvmProviderKind | null = null;
+
+export function setActiveEvmProvider(
+  p: InjectedEvmProvider | null,
+  kind: EvmProviderKind | null,
+): void {
+  activeProvider = p;
+  activeKind = kind;
+}
+
+export function getActiveProviderKind(): EvmProviderKind | null {
+  return activeKind;
+}
+
+function readInjected(): InjectedEvmProvider | null {
   if (typeof window === "undefined") return null;
   const w = window as unknown as { ethereum?: unknown };
   if (!w.ethereum) return null;
   return w.ethereum as InjectedEvmProvider;
+}
+
+function readEthereum(): InjectedEvmProvider | null {
+  if (activeProvider) return activeProvider;
+  return readInjected();
+}
+
+export function hasInjectedEthereum(): boolean {
+  return readInjected() !== null;
 }
 
 export const MESSAGE_TRANSMITTER_V2_ABI = [
@@ -136,7 +162,7 @@ function ensureProvider(): InjectedEvmProvider {
   const eth = readEthereum();
   if (!eth) {
     throw new Error(
-      "No EVM wallet detected. Install MetaMask or another browser wallet.",
+      "No EVM wallet active. Connect MetaMask or WalletConnect first.",
     );
   }
   return eth;
