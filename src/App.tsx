@@ -409,7 +409,10 @@ function App() {
     setEvmBalance(null);
   }, []);
 
-  // Reset bridge state whenever any wallet flips from connected → disconnected.
+  // Reset bridge state when any wallet flips from connected → disconnected,
+  // BUT never while a bridge is in-flight — during Stellar→EVM (and similar)
+  // the user is asked to connect the dest wallet mid-flow, which auto-evicts
+  // the source WC session; that's expected and must not abort the bridge.
   const prevConnectedRef = useRef({
     stellar: !!stellarWallet.address,
     evm: !!evmWallet.address,
@@ -426,34 +429,74 @@ function App() {
       (prev.stellar && !cur.stellar) ||
       (prev.evm && !cur.evm) ||
       (prev.solana && !cur.solana);
-    if (droppedAny) resetBridgeState();
+    if (droppedAny && !bridging) resetBridgeState();
     prevConnectedRef.current = cur;
   }, [
     stellarWallet.address,
     evmWallet.address,
     solanaWallet.address,
+    bridging,
     resetBridgeState,
   ]);
 
   // === Bridge flows ===
 
+  // Refs that always hold the LATEST wallet state, so async bridge code can
+  // wait for connection without being stuck on a stale closure value.
+  const stellarAddrRef = useRef(stellarWallet.address);
+  const evmAddrRef = useRef(evmWallet.address);
+  const solanaAddrRef = useRef(solanaWallet.address);
+  const evmChainIdRef = useRef(evmWallet.chainId);
+  useEffect(() => {
+    stellarAddrRef.current = stellarWallet.address;
+  }, [stellarWallet.address]);
+  useEffect(() => {
+    evmAddrRef.current = evmWallet.address;
+  }, [evmWallet.address]);
+  useEffect(() => {
+    solanaAddrRef.current = solanaWallet.address;
+  }, [solanaWallet.address]);
+  useEffect(() => {
+    evmChainIdRef.current = evmWallet.chainId;
+  }, [evmWallet.chainId]);
+
+  const PICK_TIMEOUT_MS = 5 * 60 * 1000;
+
+  async function pollUntil<T>(
+    getter: () => T | null | undefined,
+    timeoutMs: number,
+    label: string,
+  ): Promise<T> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const v = getter();
+      if (v) return v;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    throw new Error(`${label} not connected within ${timeoutMs / 1000}s`);
+  }
+
   async function ensureStellarConnected(): Promise<string> {
-    if (stellarWallet.address) return stellarWallet.address;
+    if (stellarAddrRef.current) return stellarAddrRef.current;
     await stellarWallet.connect();
-    if (!stellarWallet.address) throw new Error("Stellar wallet not connected");
-    return stellarWallet.address;
+    return pollUntil(() => stellarAddrRef.current, PICK_TIMEOUT_MS, "Stellar wallet");
   }
 
   async function ensureEvmConnected(): Promise<string> {
-    if (evmWallet.address) return evmWallet.address;
+    if (evmAddrRef.current) return evmAddrRef.current;
     await evmWallet.connect();
-    if (!evmWallet.address) throw new Error("EVM wallet not connected");
-    return evmWallet.address;
+    return pollUntil(() => evmAddrRef.current, PICK_TIMEOUT_MS, "EVM wallet");
+  }
+
+  async function ensureSolanaConnected(): Promise<string> {
+    if (solanaAddrRef.current) return solanaAddrRef.current;
+    await solanaWallet.connect();
+    return pollUntil(() => solanaAddrRef.current, PICK_TIMEOUT_MS, "Solana wallet");
   }
 
   async function ensureEvmOnChain(chain: ChainInfo) {
     if (!chain.evm) throw new Error("Chain not EVM");
-    if (evmWallet.chainId !== chain.evm.chainId) {
+    if (evmChainIdRef.current !== chain.evm.chainId) {
       await evmWallet.switchToChain(chain);
     }
   }
@@ -717,11 +760,7 @@ function App() {
         setProgress((p) => ({ ...p, attestation, phase: "minting" }));
 
         // Connect Solana wallet + call receive_message
-        if (!solanaWallet.address) {
-          await solanaWallet.connect();
-        }
-        const solAddr = solanaWallet.address;
-        if (!solAddr) throw new Error("Solana wallet not connected");
+        await ensureSolanaConnected();
 
         const { signature } = await solanaReceiveMessage({
           destChain: toChain,
