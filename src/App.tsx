@@ -40,6 +40,7 @@ import {
   type CctpAttestation,
 } from "@/lib/attestation";
 import { fetchStellarBalances, type StellarBalances } from "@/lib/balance";
+import { addUsdcTrustline } from "@/lib/stellar-trustline";
 import {
   evmHexValid,
   executeDepositForBurn,
@@ -186,6 +187,7 @@ function App() {
   const [progressOpen, setProgressOpen] = useState(false);
   const [contractsOpen, setContractsOpen] = useState(false);
   const [swapKick, setSwapKick] = useState(0);
+  const [addingTrustline, setAddingTrustline] = useState(false);
   const pollAbort = useRef<AbortController | null>(null);
 
   // Wallet address per chain kind. Single source of truth for both source
@@ -500,6 +502,33 @@ function App() {
       await evmWallet.switchToChain(chain);
     }
   }
+
+  // Show "Add trustline + retry" button only when:
+  //   - the error is the missing-trustline safety throw
+  //   - direction is EVM→Stellar
+  //   - recipient equals the user's CURRENTLY connected Stellar wallet
+  //     (we can only sign a trustline op on accounts we control)
+  const canFixTrustline = useMemo(() => {
+    if (!progress.error) return false;
+    if (!/no USDC trustline|verify USDC trustline/i.test(progress.error)) return false;
+    if (direction !== "evm->stellar") return false;
+    if (!stellarWallet.address) return false;
+    return recipient === stellarWallet.address;
+  }, [progress.error, direction, recipient, stellarWallet.address]);
+
+  const handleAddTrustline = useCallback(async () => {
+    if (!stellarWallet.address) return;
+    setAddingTrustline(true);
+    try {
+      await addUsdcTrustline(network, stellarWallet.address);
+      // Clear the failure state + re-trigger bridge.
+      setProgress(INIT_PROGRESS);
+    } catch (e) {
+      setProgress((p) => ({ ...p, error: formatError(e, "Add trustline failed") }));
+    } finally {
+      setAddingTrustline(false);
+    }
+  }, [stellarWallet.address, network]);
 
   const handleBridge = async () => {
     if (!direction || !activeFee || parsedAmount === null) return;
@@ -1218,6 +1247,8 @@ function App() {
                     etaSeconds={progress.etaSeconds}
                     finalityThresholdExecuted={progress.finalityThresholdExecuted}
                     feeExecutedSubunits={progress.feeExecutedSubunits}
+                    onAddTrustline={canFixTrustline ? handleAddTrustline : undefined}
+                    addingTrustline={addingTrustline}
                   />
                 </div>
               ) : null}
@@ -1252,6 +1283,8 @@ function App() {
           etaSeconds={progress.etaSeconds}
           finalityThresholdExecuted={progress.finalityThresholdExecuted}
           feeExecutedSubunits={progress.feeExecutedSubunits}
+          onAddTrustline={canFixTrustline ? handleAddTrustline : undefined}
+          addingTrustline={addingTrustline}
         />
       </Modal>
 
@@ -2062,6 +2095,8 @@ function ProgressCard({
   etaSeconds,
   finalityThresholdExecuted,
   feeExecutedSubunits,
+  onAddTrustline,
+  addingTrustline,
 }: {
   steps: TimelineStep[];
   approveTx?: string;
@@ -2078,6 +2113,8 @@ function ProgressCard({
   etaSeconds?: number;
   finalityThresholdExecuted?: number;
   feeExecutedSubunits?: string;
+  onAddTrustline?: () => void | Promise<void>;
+  addingTrustline?: boolean;
 }) {
   useTicker(phase === "attesting" && !!attestStartedAt);
   const elapsed =
@@ -2146,6 +2183,19 @@ function ProgressCard({
         <Alert variant="destructive" className="mt-3">
           <AlertTitle>Transfer failed</AlertTitle>
           <AlertDescription className="break-words">{error}</AlertDescription>
+          {onAddTrustline ? (
+            <button
+              type="button"
+              onClick={onAddTrustline}
+              disabled={addingTrustline}
+              className="mt-3 flex w-full items-center justify-center gap-2 border-2 border-background bg-background py-2 text-[11px] font-bold uppercase tracking-wider text-foreground hover:bg-foreground hover:text-background disabled:opacity-60"
+            >
+              {addingTrustline ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : null}
+              {addingTrustline ? "Adding trustline…" : "Add USDC trustline + retry"}
+            </button>
+          ) : null}
         </Alert>
       ) : null}
 
