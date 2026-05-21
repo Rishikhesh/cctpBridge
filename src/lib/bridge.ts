@@ -14,6 +14,54 @@ import { getConnectedAddress, signXdr } from "./wallet";
 
 const STELLAR_DOMAIN_FOR_SAFETY = 27;
 
+/**
+ * Extract the human-readable failure code from a Soroban send-error and
+ * map common ones to actionable English. Falls back to the raw code name.
+ */
+function formatStellarSendError(errorResult: unknown, sender: string): string {
+  let code: string | null = null;
+  try {
+    const r = errorResult as { result?: () => { switch?: () => { name?: string } } };
+    code = r?.result?.()?.switch?.()?.name ?? null;
+  } catch {
+    code = null;
+  }
+  if (!code) {
+    // Fall back to walking the JSON for `_switch.name`
+    try {
+      const json = JSON.parse(JSON.stringify(errorResult)) as {
+        _attributes?: { result?: { _switch?: { name?: string } } };
+      };
+      code = json?._attributes?.result?._switch?.name ?? null;
+    } catch {
+      // ignore
+    }
+  }
+
+  switch (code) {
+    case "txInsufficientBalance":
+      return `Stellar account ${sender.slice(0, 6)}…${sender.slice(-4)} doesn't have enough XLM to pay the network fee. Top up XLM (≈0.5 XLM is plenty for Soroban + minimum reserve) and retry.`;
+    case "txBadSeq":
+      return "Stellar tx sequence number mismatch — your wallet may have submitted another tx concurrently. Retry in a few seconds.";
+    case "txNoAccount":
+      return `Stellar account ${sender} not found on-chain. Fund it with at least 1 XLM (base reserve) and retry.`;
+    case "txTooEarly":
+    case "txTooLate":
+      return "Stellar tx outside its valid time window. Retry.";
+    case "txInsufficientFee":
+      return "Stellar tx fee too low for current congestion. Retry — the SDK will bump the fee.";
+    case "txMalformed":
+      return "Stellar tx malformed. Disconnect + reconnect wallet and retry.";
+    case "txInternalError":
+      return "Stellar network error. Retry shortly.";
+    case null:
+    case undefined:
+      return "Stellar tx send failed (unknown reason). Check the wallet for details.";
+    default:
+      return `Stellar tx send failed: ${code}`;
+  }
+}
+
 export interface DepositForBurnParams {
   network: StellarNetwork;
   senderAddress: string;
@@ -109,7 +157,7 @@ async function submitContractCall(
 
   const sendResult = await server.sendTransaction(signed as never);
   if (sendResult.status === "ERROR") {
-    throw new Error(`Send failed: ${JSON.stringify(sendResult.errorResult)}`);
+    throw new Error(formatStellarSendError(sendResult.errorResult, sender));
   }
   if (!sendResult.hash) {
     throw new Error(`[safety] Soroban sendTransaction returned no hash`);

@@ -111,6 +111,14 @@ interface ProgressState {
   attestStartedAt?: number;
   etaSeconds?: number;
   error?: string;
+  // Snapshot of the transfer at burn-start, so the status header is stable
+  // even if the user edits the form mid-flight.
+  sendAmount?: string;          // human-readable, source decimals
+  receiveAmount?: string;       // human-readable, dest decimals
+  fromName?: string;
+  toName?: string;
+  fromShort?: string;
+  toShort?: string;
 }
 
 const INIT_PROGRESS: ProgressState = { phase: "idle", pollAttempts: 0 };
@@ -530,11 +538,139 @@ function App() {
     }
   }, [stellarWallet.address, network]);
 
+  /**
+   * Runs only the destination-side mint using an existing attestation +
+   * destination chain. Called from the main flow AND from the "Retry mint"
+   * button when the mint step fails after burn+attestation succeeded — burn
+   * is irreversible so users must be able to re-attempt the mint without
+   * burning again. CCTP allows safe replay of receiveMessage as long as the
+   * nonce isn't already used.
+   */
+  const executeMintStep = useCallback(
+    async (args: {
+      dir: Direction;
+      destChain: ChainInfo;
+      srcChain: ChainInfo;
+      recipientAddr: string;
+      attestation: CctpAttestation;
+    }): Promise<{ mintTx: string }> => {
+      const { dir, destChain, srcChain, recipientAddr, attestation } = args;
+      setProgress((p) => ({ ...p, phase: "minting", error: undefined }));
+
+      if (dir === "stellar->evm" || dir === "evm->evm") {
+        const evmAddr = await ensureEvmConnected();
+        await ensureEvmOnChain(destChain);
+        const tx = await callReceiveMessage(
+          destChain,
+          evmAddr as `0x${string}`,
+          attestation.message,
+          attestation.attestation,
+        );
+        setProgress((p) => ({ ...p, mintTx: tx.txHash, phase: "minting" }));
+        const status = await waitForReceipt(destChain, tx.txHash);
+        if (status !== "success")
+          throw new Error("Destination receiveMessage reverted");
+        setProgress((p) => ({ ...p, mintTx: tx.txHash, phase: "done" }));
+        return { mintTx: tx.txHash };
+      }
+
+      if (dir === "evm->stellar") {
+        const stellarAddr = await ensureStellarConnected();
+        const mintTx = await mintAndForwardOnStellar(
+          network,
+          stellarAddr,
+          attestation.message,
+          attestation.attestation,
+        );
+        setProgress((p) => ({ ...p, mintTx, phase: "done" }));
+        return { mintTx };
+      }
+
+      if (dir === "evm->solana") {
+        await ensureSolanaConnected();
+        const { signature } = await solanaReceiveMessage({
+          destChain,
+          sourceChain: srcChain,
+          recipientPubkey: recipientAddr,
+          messageHex: attestation.message,
+          attestationHex: attestation.attestation,
+        });
+        setProgress((p) => ({ ...p, mintTx: signature, phase: "done" }));
+        return { mintTx: signature };
+      }
+
+      throw new Error(`Unknown direction: ${dir}`);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [network],
+  );
+
+  // "Retry mint" — available when burn+attestation succeeded but mint reverted
+  // or the user closed the modal mid-mint. Same recipient + chains as before;
+  // attestation reused. CCTP MessageTransmitter rejects already-used nonces,
+  // so replay is safe.
+  const canRetryMint = useMemo(() => {
+    return (
+      !!progress.attestation &&
+      !!progress.burnTx &&
+      !progress.mintTx &&
+      !bridging &&
+      !!direction
+    );
+  }, [progress.attestation, progress.burnTx, progress.mintTx, bridging, direction]);
+
+  const handleRetryMint = useCallback(async () => {
+    if (!progress.attestation || !direction) return;
+    setBridging(true);
+    setProgressOpen(true);
+    try {
+      await executeMintStep({
+        dir: direction,
+        destChain: toChain,
+        srcChain: fromChain,
+        recipientAddr: recipient,
+        attestation: progress.attestation,
+      });
+    } catch (e) {
+      setProgress((p) => ({
+        ...p,
+        phase: "error",
+        error: formatError(e, "Retry mint failed"),
+      }));
+    } finally {
+      setBridging(false);
+    }
+  }, [
+    progress.attestation,
+    direction,
+    toChain,
+    fromChain,
+    recipient,
+    executeMintStep,
+  ]);
+
   const handleBridge = async () => {
     if (!direction || !activeFee || parsedAmount === null) return;
     resetProgress();
     setBridging(true);
     setProgressOpen(true);
+    // Snapshot quote values so the status header doesn't shift if the user
+    // edits the form mid-flight.
+    const destDecimalsLocal =
+      toChain.kind === "stellar" ? USDC_DECIMALS_STELLAR : USDC_DECIMALS_CCTP;
+    const destReceiveLocal =
+      toChain.kind === "stellar"
+        ? receiveAmount * 10n ** BigInt(USDC_DECIMALS_STELLAR - USDC_DECIMALS_CCTP)
+        : receiveAmount;
+    setProgress((p) => ({
+      ...p,
+      sendAmount: formatUsdc(parsedAmount, fromDecimals),
+      receiveAmount: formatUsdc(destReceiveLocal, destDecimalsLocal),
+      fromName: fromChain.name,
+      toName: toChain.name,
+      fromShort: fromChain.shortName,
+      toShort: toChain.shortName,
+    }));
 
     try {
       if (direction === "stellar->evm") {
@@ -1249,6 +1385,12 @@ function App() {
                     feeExecutedSubunits={progress.feeExecutedSubunits}
                     onAddTrustline={canFixTrustline ? handleAddTrustline : undefined}
                     addingTrustline={addingTrustline}
+                    sendAmount={progress.sendAmount}
+                    receiveAmount={progress.receiveAmount}
+                    fromShort={progress.fromShort}
+                    toShort={progress.toShort}
+                    onRetryMint={handleRetryMint}
+                    canRetryMint={canRetryMint}
                   />
                 </div>
               ) : null}
@@ -1285,6 +1427,12 @@ function App() {
           feeExecutedSubunits={progress.feeExecutedSubunits}
           onAddTrustline={canFixTrustline ? handleAddTrustline : undefined}
           addingTrustline={addingTrustline}
+          sendAmount={progress.sendAmount}
+          receiveAmount={progress.receiveAmount}
+          fromShort={progress.fromShort}
+          toShort={progress.toShort}
+          onRetryMint={handleRetryMint}
+          canRetryMint={canRetryMint}
         />
       </Modal>
 
@@ -2097,6 +2245,12 @@ function ProgressCard({
   feeExecutedSubunits,
   onAddTrustline,
   addingTrustline,
+  sendAmount,
+  receiveAmount,
+  fromShort,
+  toShort,
+  onRetryMint,
+  canRetryMint,
 }: {
   steps: TimelineStep[];
   approveTx?: string;
@@ -2115,6 +2269,12 @@ function ProgressCard({
   feeExecutedSubunits?: string;
   onAddTrustline?: () => void | Promise<void>;
   addingTrustline?: boolean;
+  sendAmount?: string;
+  receiveAmount?: string;
+  fromShort?: string;
+  toShort?: string;
+  onRetryMint?: () => void | Promise<void>;
+  canRetryMint?: boolean;
 }) {
   useTicker(phase === "attesting" && !!attestStartedAt);
   const elapsed =
@@ -2123,6 +2283,24 @@ function ProgressCard({
     etaSeconds !== undefined && etaSeconds > elapsed ? etaSeconds - elapsed : 0;
   return (
     <div className="bg-card p-5">
+      {sendAmount && receiveAmount && fromShort && toShort ? (
+        <div className="mb-4 grid grid-cols-[1fr_auto_1fr] items-center gap-3 border border-border-strong bg-card-elevated p-3">
+          <div className="min-w-0">
+            <div className="eyebrow">Send · {fromShort}</div>
+            <div className="truncate font-mono text-base font-bold">
+              {sendAmount} <span className="text-muted-foreground">USDC</span>
+            </div>
+          </div>
+          <div className="text-muted-foreground">→</div>
+          <div className="min-w-0 text-right">
+            <div className="eyebrow">Receive · {toShort}</div>
+            <div className="truncate font-mono text-base font-bold">
+              {receiveAmount} <span className="text-muted-foreground">USDC</span>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <div className="mb-3 flex items-center justify-between border-b border-border-strong pb-2">
         <span className="eyebrow">Status</span>
         {phase === "done" ? <Badge variant="success">Completed</Badge> : null}
@@ -2197,6 +2375,25 @@ function ProgressCard({
             </button>
           ) : null}
         </Alert>
+      ) : null}
+
+      {canRetryMint && onRetryMint ? (
+        <div className="mt-3 border border-border-strong bg-card-elevated p-3">
+          <div className="eyebrow mb-1">Burn confirmed · mint pending</div>
+          <p className="mb-2 text-[11px] text-muted-foreground">
+            Your USDC is already burned on {fromChain.name} and attested by
+            Circle. Click below to (re)submit the mint on {toChain.name}.
+            Safe to retry — CCTP rejects already-used nonces.
+          </p>
+          <button
+            type="button"
+            onClick={onRetryMint}
+            className="flex w-full items-center justify-center gap-2 border-2 border-foreground bg-primary py-2 text-[11px] font-bold uppercase tracking-wider text-primary-foreground hover:bg-foreground hover:text-background"
+          >
+            <ArrowUpRight className="size-3.5" />
+            Retry mint on {toChain.name}
+          </button>
+        </div>
       ) : null}
 
       {attestation && phase !== "done" ? <AttestationPanel attestation={attestation} /> : null}

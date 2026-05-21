@@ -127,24 +127,38 @@ export function useEvmWallet() {
         }
         return;
       }
-      if (injectedAvailable) {
+      // Injected restore: ONLY if the user previously connected via our flow
+      // (KEY_KIND === "injected"). Otherwise `eth_accounts` silently returns
+      // the already-permitted address from a prior unrelated dApp session,
+      // which makes the UI look connected even though the user never clicked
+      // Connect here — leading to "wallet not connected" later when chain
+      // switching / signing tries to use it.
+      if (
+        injectedAvailable &&
+        kind === "injected" &&
+        localStorage.getItem(KEY_ADDR)
+      ) {
         const provider = readInjectedRaw();
         if (!provider) return;
-        setActiveEvmProvider(provider, "injected");
-        attachListeners(provider, "injected");
-        const stored = localStorage.getItem(KEY_ADDR);
-        if (stored) setAddress(stored);
         try {
-          const id = await evmChainId();
-          if (!cancelled) setChainId(id);
           const accs = (await provider.request({
             method: "eth_accounts",
           })) as string[];
-          if (!cancelled && accs?.[0]) {
-            setAddress(accs[0]);
+          const stored = localStorage.getItem(KEY_ADDR);
+          if (!cancelled && stored && accs?.includes(stored)) {
+            setActiveEvmProvider(provider, "injected");
+            attachListeners(provider, "injected");
+            setAddress(stored);
             setProviderKind("injected");
-            localStorage.setItem(KEY_ADDR, accs[0]);
-            localStorage.setItem(KEY_KIND, "injected");
+            try {
+              setChainId(await evmChainId());
+            } catch {
+              // ignore
+            }
+          } else if (!cancelled) {
+            // Wallet revoked us OR stored address no longer permitted.
+            localStorage.removeItem(KEY_ADDR);
+            localStorage.removeItem(KEY_KIND);
           }
         } catch {
           // ignore

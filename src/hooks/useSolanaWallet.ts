@@ -18,13 +18,15 @@ export function useSolanaWallet() {
   const available = hasSolanaProvider();
 
   useEffect(() => {
-    const stored = localStorage.getItem(KEY);
-    if (stored) setAddress(stored);
+    // Only mark address connected if Phantom confirms via onlyIfTrusted
+    // (proves prior in-app connect). Do not pre-fill from localStorage.
     (async () => {
       const live = await solanaSilentConnect();
       if (live) {
         setAddress(live);
         localStorage.setItem(KEY, live);
+      } else {
+        localStorage.removeItem(KEY);
       }
     })();
     const provider = getSolanaProvider();

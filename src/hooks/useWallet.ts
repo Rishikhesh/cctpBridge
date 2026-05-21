@@ -38,26 +38,39 @@ export function useWallet() {
     let cancelled = false;
     const storedAddr = localStorage.getItem(ADDR_KEY);
     const storedWalletId = localStorage.getItem(WALLET_ID_KEY);
-    if (!storedAddr) return;
+    if (!storedAddr || !storedWalletId) return;
 
     // Restore the previously-selected wallet module on the kit BEFORE doing
     // any reads/signs — otherwise the kit defaults back to Freighter and any
     // sign call surfaces "Freighter is not connected" even though we paired
     // via WalletConnect / LOBSTR / xBull etc.
-    if (storedWalletId) {
-      try {
-        setActiveWalletId(network, storedWalletId);
-      } catch {
-        // ignore — fallback to address-only restore
-      }
+    try {
+      setActiveWalletId(network, storedWalletId);
+    } catch {
+      // module unavailable — drop stale state
+      localStorage.removeItem(ADDR_KEY);
+      localStorage.removeItem(WALLET_ID_KEY);
+      return;
     }
 
     (async () => {
       try {
         const addr = await getConnectedAddress(network);
-        if (!cancelled) setAddress(addr ?? storedAddr);
+        if (cancelled) return;
+        if (addr && addr === storedAddr) {
+          // Kit verified the session matches what we stored — safe to restore.
+          setAddress(addr);
+        } else {
+          // Kit returned null OR a different address (e.g. user changed
+          // accounts in their wallet). Don't show ghost-connected state.
+          localStorage.removeItem(ADDR_KEY);
+          localStorage.removeItem(WALLET_ID_KEY);
+        }
       } catch {
-        if (!cancelled) setAddress(storedAddr);
+        if (!cancelled) {
+          localStorage.removeItem(ADDR_KEY);
+          localStorage.removeItem(WALLET_ID_KEY);
+        }
       }
     })();
     return () => {
