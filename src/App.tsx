@@ -14,6 +14,7 @@ import {
   Zap,
 } from "lucide-react";
 import { Modal } from "@/components/Modal";
+import { StellarWalletPicker } from "@/components/StellarWalletPicker";
 import { useTheme } from "@/hooks/useTheme";
 import { Moon, Sun } from "lucide-react";
 import {
@@ -1129,6 +1130,13 @@ function App() {
       >
         <ContractList config={config} />
       </Modal>
+
+      <StellarWalletPicker
+        open={stellarWallet.pickerOpen}
+        network={network}
+        onClose={stellarWallet.closePicker}
+        onConnected={(addr) => stellarWallet.handleConnected(addr)}
+      />
     </div>
   );
 }

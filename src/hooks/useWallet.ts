@@ -1,9 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import {
-  openWalletModal,
-  disconnectWallet,
-  getConnectedAddress,
-} from "@/lib/wallet";
+import { disconnectWallet, getConnectedAddress } from "@/lib/wallet";
 import type { StellarNetwork } from "@/lib/cctp";
 
 const ADDR_KEY = "cctp:address";
@@ -17,6 +13,7 @@ export function useWallet() {
   const [address, setAddress] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -35,20 +32,23 @@ export function useWallet() {
     };
   }, [network]);
 
+  // Opens the custom picker. Connection itself happens in
+  // StellarWalletPicker.onConnected callback (which calls setAddress below).
   const connect = useCallback(async () => {
     setError(null);
-    setConnecting(true);
-    try {
-      const { address } = await openWalletModal(network);
-      setAddress(address);
-      localStorage.setItem(ADDR_KEY, address);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setError(msg);
-    } finally {
-      setConnecting(false);
-    }
-  }, [network]);
+    setPickerOpen(true);
+  }, []);
+
+  const handleConnected = useCallback((addr: string) => {
+    setAddress(addr);
+    localStorage.setItem(ADDR_KEY, addr);
+    setConnecting(false);
+  }, []);
+
+  const closePicker = useCallback(() => {
+    setPickerOpen(false);
+    setConnecting(false);
+  }, []);
 
   const disconnect = useCallback(async () => {
     try {
@@ -78,5 +78,8 @@ export function useWallet() {
     disconnect,
     connecting,
     error,
+    pickerOpen,
+    closePicker,
+    handleConnected,
   };
 }

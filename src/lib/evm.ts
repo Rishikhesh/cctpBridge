@@ -27,15 +27,21 @@ function assertBytes32(hex: string, label: string) {
   }
 }
 
-declare global {
-  interface Window {
-    ethereum?: {
-      request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
-      on?: (event: string, cb: (...args: unknown[]) => void) => void;
-      removeListener?: (event: string, cb: (...args: unknown[]) => void) => void;
-      isMetaMask?: boolean;
-    };
-  }
+// EIP-1193 provider shape we rely on. We don't redeclare `window.ethereum`
+// globally because @reown/appkit / @walletconnect already augment it with a
+// looser type. Instead we cast through this interface where needed.
+interface InjectedEvmProvider {
+  request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
+  on?: (event: string, cb: (...args: unknown[]) => void) => void;
+  removeListener?: (event: string, cb: (...args: unknown[]) => void) => void;
+  isMetaMask?: boolean;
+}
+
+function readEthereum(): InjectedEvmProvider | null {
+  if (typeof window === "undefined") return null;
+  const w = window as unknown as { ethereum?: unknown };
+  if (!w.ethereum) return null;
+  return w.ethereum as InjectedEvmProvider;
 }
 
 export const MESSAGE_TRANSMITTER_V2_ABI = [
@@ -123,16 +129,17 @@ export const ERC20_ABI = [
 ] as const;
 
 export function hasEthereumProvider(): boolean {
-  return typeof window !== "undefined" && !!window.ethereum;
+  return readEthereum() !== null;
 }
 
-function ensureProvider() {
-  if (!hasEthereumProvider() || !window.ethereum) {
+function ensureProvider(): InjectedEvmProvider {
+  const eth = readEthereum();
+  if (!eth) {
     throw new Error(
       "No EVM wallet detected. Install MetaMask or another browser wallet.",
     );
   }
-  return window.ethereum;
+  return eth;
 }
 
 export async function evmConnect(): Promise<Address> {

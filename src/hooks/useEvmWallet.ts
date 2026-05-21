@@ -15,10 +15,15 @@ export function useEvmWallet() {
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const provider = typeof window !== "undefined" ? window.ethereum : undefined;
   const available = hasEthereumProvider();
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    interface ProviderShape {
+      on?: (event: string, cb: (...args: unknown[]) => void) => void;
+      removeListener?: (event: string, cb: (...args: unknown[]) => void) => void;
+    }
+    const provider = (window as unknown as { ethereum?: ProviderShape }).ethereum;
     if (!provider) return;
     const stored = localStorage.getItem(KEY);
     if (stored) setAddress(stored);
@@ -47,7 +52,7 @@ export function useEvmWallet() {
       provider.removeListener?.("accountsChanged", onAccounts);
       provider.removeListener?.("chainChanged", onChain);
     };
-  }, [provider]);
+  }, []);
 
   const connect = useCallback(async () => {
     setError(null);
