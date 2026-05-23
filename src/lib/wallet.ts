@@ -9,6 +9,7 @@ import {
   WalletConnectModule,
   WalletConnectTargetChain,
 } from "@creit.tech/stellar-wallets-kit/modules/wallet-connect";
+import { LedgerModule } from "@creit.tech/stellar-wallets-kit/modules/ledger";
 import type { StellarNetwork } from "./cctp";
 
 export interface ConnectedWallet {
@@ -63,10 +64,21 @@ function getOrCreateWcModule(net: StellarNetwork): WalletConnectModule | null {
   }
 }
 
+// Single Ledger module instance — uses WebUSB/WebHID transport which the
+// kit lazy-opens on getAddress / sign calls. Safe to keep across networks.
+const G_LEDGER = globalThis as unknown as { __cctpLedger?: LedgerModule };
+function getLedgerModule(): LedgerModule {
+  if (!G_LEDGER.__cctpLedger) {
+    G_LEDGER.__cctpLedger = new LedgerModule();
+  }
+  return G_LEDGER.__cctpLedger;
+}
+
 function buildModules(net: StellarNetwork) {
   const mods = defaultModules();
   const wc = getOrCreateWcModule(net);
   if (wc) mods.push(wc);
+  mods.push(getLedgerModule());
   return mods;
 }
 
@@ -182,6 +194,11 @@ function isStaleWcSessionError(e: unknown): boolean {
   return /session topic does not exist|No matching key/i.test(s);
 }
 
+function isUnsupportedSorobanOpError(e: unknown): boolean {
+  const s = e instanceof Error ? e.message : typeof e === "string" ? e : "";
+  return /invokeHostFunction|unsupported operation|hostFunction|soroban/i.test(s);
+}
+
 async function purgeStaleWcSession(): Promise<void> {
   // Wipe any cached WC sign-client session data on this origin so the next
   // connect rebuilds cleanly. Safe — only touches WC keys.
@@ -217,6 +234,11 @@ export async function signXdr(
       await purgeStaleWcSession();
       throw new Error(
         "Your WalletConnect session expired. Disconnect Stellar wallet and reconnect to continue.",
+      );
+    }
+    if (isUnsupportedSorobanOpError(e)) {
+      throw new Error(
+        "Your Stellar wallet doesn't support Soroban (invokeHostFunction). CCTP requires Soroban signing. Update your wallet app (Ledger Stellar app v6.0+) or switch to Freighter / LOBSTR / xBull / Hana.",
       );
     }
     throw e;
