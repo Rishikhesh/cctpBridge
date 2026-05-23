@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   clearHistory,
   loadHistory,
@@ -32,5 +32,12 @@ export function useTxHistory() {
     setList([]);
   }, []);
 
-  return { list, upsert, remove, clear };
+  // MUST memoize the return object so consumers can safely add the hook
+  // result to a useEffect dep array without re-firing every render. Each
+  // inner ref (upsert/remove/clear) is already stable via useCallback;
+  // `list` only changes on real mutation.
+  return useMemo(
+    () => ({ list, upsert, remove, clear }),
+    [list, upsert, remove, clear],
+  );
 }

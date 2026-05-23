@@ -91,7 +91,14 @@ export function upsertHistory(entry: HistoryEntry): HistoryEntry[] {
   const idx = list.findIndex((e) => e.id === entry.id);
   const next: HistoryEntry =
     idx >= 0
-      ? { ...list[idx], ...entry, updatedAt: Date.now() }
+      ? {
+          ...list[idx],
+          ...entry,
+          // Preserve the original createdAt; the caller may pass 0 as a
+          // sentinel when patching an in-flight record.
+          createdAt: list[idx].createdAt || entry.createdAt,
+          updatedAt: Date.now(),
+        }
       : { ...entry, updatedAt: Date.now() };
 
   // Trim heavy fields once a transfer settles successfully — attestation hex

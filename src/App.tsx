@@ -426,15 +426,33 @@ function App() {
     txIdRef.current = null;
   };
 
-  // Mirror in-flight progress into history whenever it changes.
+  // Mirror in-flight progress into history whenever progress changes.
+  // Only the `upsert` callback (stable via useCallback) is in the dep array;
+  // including the whole `txHistory` object would re-fire every render and
+  // thrash localStorage + re-renders.
   useEffect(() => {
     const id = txIdRef.current;
     if (!id) return;
     if (!progress.fromName || !progress.toName) return;
-    const existing = txHistory.list.find((e) => e.id === id);
-    if (!existing) return;
+    // upsertHistory internally re-reads fresh state from localStorage, so we
+    // don't need an `existing` lookup here — passing a partial that lacks
+    // pre-existing fields would overwrite them. Build a minimal patch with
+    // only the fields that change during the lifecycle.
     txHistory.upsert({
-      ...existing,
+      id,
+      // Required fields filled in at bridge-start; we re-supply them so the
+      // record is well-formed even if it was evicted + recreated.
+      createdAt: 0, // ignored when entry exists (preserves original)
+      updatedAt: Date.now(),
+      direction: (direction ?? "evm->evm") as HistoryEntry["direction"],
+      fromChainId: fromChain.id,
+      toChainId: toChain.id,
+      network,
+      sendAmount: progress.sendAmount ?? "",
+      receiveAmount: progress.receiveAmount ?? "",
+      recipient,
+      sender: walletAddressFor(fromChain.kind) ?? "",
+      speed,
       phase: progress.phase as HistoryPhase,
       approveTx: progress.approveTx,
       burnTx: progress.burnTx,
@@ -442,8 +460,8 @@ function App() {
       attestationMessage: progress.attestation?.message,
       attestationHex: progress.attestation?.attestation,
       error: progress.error,
-      updatedAt: Date.now(),
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     progress.phase,
     progress.approveTx,
@@ -453,7 +471,7 @@ function App() {
     progress.error,
     progress.fromName,
     progress.toName,
-    txHistory,
+    txHistory.upsert,
   ]);
 
   /** Wipes all in-flight bridge state. Called when any wallet disconnects so
