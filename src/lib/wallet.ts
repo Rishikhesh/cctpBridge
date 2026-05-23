@@ -129,17 +129,14 @@ export async function listAvailableWallets(
  * an account index then writes the path into its internal signal. We use a
  * custom picker so that step is skipped — first call to getAddress hits
  * `mnemonicPath.value === undefined` and crashes with "Cannot read properties
- * of undefined (reading 'split')". Fix: read account index 0, then register
- * the path in kit state ourselves.
+ * of undefined (reading 'split')". Fix: read selected index, then register
+ * the path in kit state ourselves so signTransaction can find it.
  */
-async function resolveLedgerAddress(): Promise<string> {
+async function resolveLedgerAddress(accountIndex: number): Promise<string> {
   const ledger = getLedgerModule();
-  const accountIndex = 0;
   const path = `44'/148'/${accountIndex}'`;
   const { address } = await ledger.getAddress({ path });
   if (!address) throw new Error("Ledger returned empty address");
-  // Mirror what authModal does internally so subsequent sign / getAddress
-  // calls find the path.
   const current = hardwareWalletPaths.value ?? [];
   const next = current
     .filter((e) => e.publicKey !== address)
@@ -147,6 +144,43 @@ async function resolveLedgerAddress(): Promise<string> {
   hardwareWalletPaths.value = next;
   kitActiveAddress.value = address;
   return address;
+}
+
+export interface LedgerAccountOption {
+  index: number;
+  address: string;
+}
+
+/**
+ * Reads N consecutive Stellar derivations from the connected Ledger so the
+ * user can pick which account to sign with. Stops on first transport error.
+ */
+export async function listLedgerAccounts(
+  count = 5,
+): Promise<LedgerAccountOption[]> {
+  const ledger = getLedgerModule();
+  const out: LedgerAccountOption[] = [];
+  for (let i = 0; i < count; i++) {
+    const path = `44'/148'/${i}'`;
+    const { address } = await ledger.getAddress({ path });
+    if (!address) break;
+    out.push({ index: i, address });
+  }
+  return out;
+}
+
+/**
+ * Finalize Ledger connection on a chosen account index. Network is the
+ * Stellar network for sign-network-passphrase routing.
+ */
+export async function selectLedgerAccount(
+  network: StellarNetwork,
+  accountIndex: number,
+): Promise<ConnectedWallet> {
+  ensureInit(network);
+  StellarWalletsKit.setWallet(LEDGER_ID);
+  const address = await resolveLedgerAddress(accountIndex);
+  return { address };
 }
 
 export async function selectWallet(
@@ -174,8 +208,10 @@ export async function selectWallet(
   StellarWalletsKit.setWallet(walletId);
 
   // Ledger needs explicit BIP path setup before fetchAddress.
+  // Callers should normally use selectLedgerAccount(net, index) with an
+  // index chosen via listLedgerAccounts; this fallback uses index 0.
   if (walletId === LEDGER_ID) {
-    const address = await resolveLedgerAddress();
+    const address = await resolveLedgerAddress(0);
     return { address };
   }
 
