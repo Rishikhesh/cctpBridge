@@ -189,14 +189,45 @@ export function setActiveWalletId(network: StellarNetwork, walletId: string): vo
   StellarWalletsKit.setWallet(walletId);
 }
 
+function errString(e: unknown): string {
+  if (e instanceof Error) return `${e.message} ${(e as { details?: string }).details ?? ""}`;
+  if (typeof e === "string") return e;
+  try {
+    return JSON.stringify(e);
+  } catch {
+    return String(e);
+  }
+}
+
 function isStaleWcSessionError(e: unknown): boolean {
-  const s = e instanceof Error ? e.message : typeof e === "string" ? e : "";
-  return /session topic does not exist|No matching key/i.test(s);
+  return /session topic does not exist|No matching key|pending session not found/i.test(
+    errString(e),
+  );
 }
 
 function isUnsupportedSorobanOpError(e: unknown): boolean {
-  const s = e instanceof Error ? e.message : typeof e === "string" ? e : "";
-  return /invokeHostFunction|unsupported operation|hostFunction|soroban/i.test(s);
+  return /invokeHostFunction|unsupported operation|hostFunction|soroban/i.test(
+    errString(e),
+  );
+}
+
+function isUserRejection(e: unknown): boolean {
+  const s = errString(e);
+  // 0x6985 = Ledger user rejection APDU. 4001 = EIP-1193 user rejection.
+  return /user rejected|user denied|user declined|rejected by the user|declined transaction|user cancel|0x6985|\\b4001\\b/i.test(
+    s,
+  );
+}
+
+function isLedgerNotReady(e: unknown): boolean {
+  const s = errString(e);
+  return /no device selected|locked|app is not open|UNKNOWN_APDU|cla_not_supported|0x6a00|0x6e00|0x6d00|TransportStatusError/i.test(
+    s,
+  );
+}
+
+function isLedgerBlindSign(e: unknown): boolean {
+  return /blind sign|blind signing|enable blind|blind-signing/i.test(errString(e));
 }
 
 async function purgeStaleWcSession(): Promise<void> {
@@ -223,13 +254,16 @@ export async function signXdr(
   address: string,
 ): Promise<string> {
   ensureInit(network);
+  let signedTxXdr: string;
   try {
-    const { signedTxXdr } = await StellarWalletsKit.signTransaction(xdr, {
+    ({ signedTxXdr } = await StellarWalletsKit.signTransaction(xdr, {
       networkPassphrase,
       address,
-    });
-    return signedTxXdr;
+    }));
   } catch (e) {
+    if (isUserRejection(e)) {
+      throw new Error("You rejected the signing request in your Stellar wallet.");
+    }
     if (isStaleWcSessionError(e)) {
       await purgeStaleWcSession();
       throw new Error(
@@ -241,8 +275,23 @@ export async function signXdr(
         "Your Stellar wallet doesn't support Soroban (invokeHostFunction). CCTP requires Soroban signing. Update your wallet app (Ledger Stellar app v6.0+) or switch to Freighter / LOBSTR / xBull / Hana.",
       );
     }
-    throw e;
+    if (isLedgerBlindSign(e)) {
+      throw new Error(
+        "Enable 'Blind signing' in the Stellar app on your Ledger device, then retry. Settings → Stellar → Blind signing → Enabled.",
+      );
+    }
+    if (isLedgerNotReady(e)) {
+      throw new Error(
+        "Ledger not ready: unlock your device, open the Stellar app (v6.0+), and approve the WebUSB connection in the browser.",
+      );
+    }
+    throw new Error(`Stellar sign failed: ${errString(e)}`);
   }
+  // Defense-in-depth: kit returned successfully but no signed XDR.
+  if (!signedTxXdr || typeof signedTxXdr !== "string") {
+    throw new Error("Stellar wallet returned an empty signature. Retry.");
+  }
+  return signedTxXdr;
 }
 
 export const WALLETCONNECT_ENABLED = WC_PROJECT_ID.length > 0;

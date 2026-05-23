@@ -27,6 +27,52 @@ function assertBytes32(hex: string, label: string) {
   }
 }
 
+function errString(e: unknown): string {
+  if (e instanceof Error) {
+    const ex = e as Error & { shortMessage?: string; details?: string };
+    return [ex.shortMessage, ex.message, ex.details].filter(Boolean).join(" · ");
+  }
+  if (typeof e === "string") return e;
+  try {
+    return JSON.stringify(e);
+  } catch {
+    return String(e);
+  }
+}
+
+function classifyEvmError(e: unknown): Error {
+  const msg = errString(e);
+  const code = (e as { code?: number })?.code;
+  // EIP-1193 user rejection (MetaMask, Rabby, Coinbase) — code 4001.
+  if (code === 4001 || /user rejected|user denied|rejected by the user/i.test(msg)) {
+    return new Error("You rejected the request in your EVM wallet.");
+  }
+  // -32002 = "request already pending"
+  if (code === -32002 || /already pending/i.test(msg)) {
+    return new Error("A request is already pending in your wallet. Open it to confirm.");
+  }
+  // -32603 = Internal JSON-RPC error (often from WC mobile not handling method)
+  if (/method not (?:found|supported)|not implemented/i.test(msg)) {
+    return new Error(
+      "Your wallet doesn't support this operation. Switch wallets or update the app.",
+    );
+  }
+  // viem revert info usually carries `shortMessage: "Execution reverted ..."`
+  if (/execution reverted|revert(?:ed)?/i.test(msg)) {
+    return new Error(`Transaction simulation reverted: ${msg}`);
+  }
+  if (/insufficient funds|insufficient balance/i.test(msg)) {
+    return new Error("Insufficient native balance for gas on the source chain.");
+  }
+  if (/chain mismatch|wrong network/i.test(msg)) {
+    return new Error("Wallet on the wrong chain. Switch chain in the wallet and retry.");
+  }
+  if (/nonce too low|known transaction|replacement transaction/i.test(msg)) {
+    return new Error("Nonce mismatch — wait for a pending tx to clear and retry.");
+  }
+  return new Error(`EVM sign failed: ${msg}`);
+}
+
 // EIP-1193 provider shape we rely on. Both `window.ethereum` (MetaMask /
 // injected) and WalletConnect's EthereumProvider implement this surface.
 export interface InjectedEvmProvider {
@@ -324,13 +370,17 @@ export async function callReceiveMessage(
 
   const pub = publicClient(chain.evm);
   // Dry-run via simulate to catch reverts (wrong dest domain, replay, etc.)
-  await pub.simulateContract({
-    address: chain.evm.messageTransmitter,
-    abi: MESSAGE_TRANSMITTER_V2_ABI,
-    functionName: "receiveMessage",
-    args: [messageHex as Hex, attestationHex as Hex],
-    account,
-  });
+  try {
+    await pub.simulateContract({
+      address: chain.evm.messageTransmitter,
+      abi: MESSAGE_TRANSMITTER_V2_ABI,
+      functionName: "receiveMessage",
+      args: [messageHex as Hex, attestationHex as Hex],
+      account,
+    });
+  } catch (e) {
+    throw classifyEvmError(e);
+  }
 
   const data = encodeFunctionData({
     abi: MESSAGE_TRANSMITTER_V2_ABI,
@@ -345,14 +395,18 @@ export async function callReceiveMessage(
   });
 
   const wallet = walletClient();
-  const hash = await wallet.sendTransaction({
-    account,
-    chain: null,
-    to: chain.evm.messageTransmitter,
-    data,
-    gas,
-  });
-  return { txHash: hash };
+  try {
+    const hash = await wallet.sendTransaction({
+      account,
+      chain: null,
+      to: chain.evm.messageTransmitter,
+      data,
+      gas,
+    });
+    return { txHash: hash };
+  } catch (e) {
+    throw classifyEvmError(e);
+  }
 }
 
 export async function waitForReceipt(
@@ -406,13 +460,17 @@ export async function evmApproveUsdc(
   await assertLiveAccount(account);
 
   const pub = publicClient(chain.evm);
-  await pub.simulateContract({
-    address: chain.evm.usdc,
-    abi: ERC20_ABI,
-    functionName: "approve",
-    args: [chain.evm.tokenMessenger, amount],
-    account,
-  });
+  try {
+    await pub.simulateContract({
+      address: chain.evm.usdc,
+      abi: ERC20_ABI,
+      functionName: "approve",
+      args: [chain.evm.tokenMessenger, amount],
+      account,
+    });
+  } catch (e) {
+    throw classifyEvmError(e);
+  }
 
   const data = encodeFunctionData({
     abi: ERC20_ABI,
@@ -427,13 +485,17 @@ export async function evmApproveUsdc(
   });
 
   const wallet = walletClient();
-  return wallet.sendTransaction({
-    account,
-    chain: null,
-    to: chain.evm.usdc,
-    data,
-    gas,
-  });
+  try {
+    return await wallet.sendTransaction({
+      account,
+      chain: null,
+      to: chain.evm.usdc,
+      data,
+      gas,
+    });
+  } catch (e) {
+    throw classifyEvmError(e);
+  }
 }
 
 async function assertLiveAccount(expected: Address) {
@@ -509,39 +571,43 @@ export async function evmDepositForBurn(
 
   // Dry-run via simulate to catch onchain reverts (allowance, fee schedule, etc.).
   const pub = publicClient(chain.evm);
-  if (args.hookData) {
-    await pub.simulateContract({
-      address: chain.evm.tokenMessenger,
-      abi: TOKEN_MESSENGER_V2_ABI,
-      functionName: "depositForBurnWithHook",
-      args: [
-        args.amount,
-        args.destinationDomain,
-        args.mintRecipient,
-        args.burnToken,
-        args.destinationCaller,
-        args.maxFee,
-        args.minFinalityThreshold,
-        args.hookData,
-      ],
-      account,
-    });
-  } else {
-    await pub.simulateContract({
-      address: chain.evm.tokenMessenger,
-      abi: TOKEN_MESSENGER_V2_ABI,
-      functionName: "depositForBurn",
-      args: [
-        args.amount,
-        args.destinationDomain,
-        args.mintRecipient,
-        args.burnToken,
-        args.destinationCaller,
-        args.maxFee,
-        args.minFinalityThreshold,
-      ],
-      account,
-    });
+  try {
+    if (args.hookData) {
+      await pub.simulateContract({
+        address: chain.evm.tokenMessenger,
+        abi: TOKEN_MESSENGER_V2_ABI,
+        functionName: "depositForBurnWithHook",
+        args: [
+          args.amount,
+          args.destinationDomain,
+          args.mintRecipient,
+          args.burnToken,
+          args.destinationCaller,
+          args.maxFee,
+          args.minFinalityThreshold,
+          args.hookData,
+        ],
+        account,
+      });
+    } else {
+      await pub.simulateContract({
+        address: chain.evm.tokenMessenger,
+        abi: TOKEN_MESSENGER_V2_ABI,
+        functionName: "depositForBurn",
+        args: [
+          args.amount,
+          args.destinationDomain,
+          args.mintRecipient,
+          args.burnToken,
+          args.destinationCaller,
+          args.maxFee,
+          args.minFinalityThreshold,
+        ],
+        account,
+      });
+    }
+  } catch (e) {
+    throw classifyEvmError(e);
   }
 
   const data = args.hookData
@@ -580,13 +646,17 @@ export async function evmDepositForBurn(
   });
 
   const wallet = walletClient();
-  return wallet.sendTransaction({
-    account,
-    chain: null,
-    to: chain.evm.tokenMessenger,
-    data,
-    gas,
-  });
+  try {
+    return await wallet.sendTransaction({
+      account,
+      chain: null,
+      to: chain.evm.tokenMessenger,
+      data,
+      gas,
+    });
+  } catch (e) {
+    throw classifyEvmError(e);
+  }
 }
 
 export { assertEvmRecipient, assertBytes32, ZERO_ADDRESS, ZERO_BYTES32 };

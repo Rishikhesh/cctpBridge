@@ -351,10 +351,19 @@ export async function solanaReceiveMessage(
 
   const phantom = getSolanaProvider();
   if (!phantom) throw new Error("Solana wallet not available");
-  const { signature } = await phantom.signAndSendTransaction(tx, {
-    skipPreflight: false,
-    maxRetries: 5,
-  });
+  let signature: string;
+  try {
+    const res = await phantom.signAndSendTransaction(tx, {
+      skipPreflight: false,
+      maxRetries: 5,
+    });
+    signature = res.signature;
+  } catch (e) {
+    throw classifySolanaSignError(e);
+  }
+  if (!signature) {
+    throw new Error("Solana wallet returned no signature. Retry.");
+  }
 
   // Sanity: lastValidBlockHeight not actively used by getSignatureStatuses
   // loop, but log it via the deadline check below so the value is read.
@@ -406,6 +415,39 @@ export async function solanaUsdcBalance(
   const ata = await getAssociatedTokenAddress(new PublicKey(chain.solana.usdcMint), ownerPk);
   const info = await connection.getTokenAccountBalance(ata).catch(() => null);
   return info?.value?.amount ? BigInt(info.value.amount) : 0n;
+}
+
+function errString(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (typeof e === "string") return e;
+  try {
+    return JSON.stringify(e);
+  } catch {
+    return String(e);
+  }
+}
+
+function classifySolanaSignError(e: unknown): Error {
+  const msg = errString(e);
+  const code = (e as { code?: number })?.code;
+  // Phantom uses 4001 for user rejection, similar to EIP-1193.
+  if (code === 4001 || /user rejected|user declined|user canceled/i.test(msg)) {
+    return new Error("You rejected the signing request in your Solana wallet.");
+  }
+  if (/insufficient.*lamport|insufficient.*sol|insufficient funds/i.test(msg)) {
+    return new Error(
+      "Insufficient SOL in your wallet to pay transaction + rent. Top up SOL and retry.",
+    );
+  }
+  if (/blockhash not found|expired/i.test(msg)) {
+    return new Error(
+      "Solana blockhash expired before submission. Retry — the next attempt will use a fresh blockhash.",
+    );
+  }
+  if (/not connected|disconnected/i.test(msg)) {
+    return new Error("Solana wallet disconnected mid-flow. Reconnect and retry.");
+  }
+  return new Error(`Solana sign failed: ${msg}`);
 }
 
 export function isValidSolanaAddress(addr: string): boolean {
