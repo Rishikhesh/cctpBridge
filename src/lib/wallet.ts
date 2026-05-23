@@ -9,7 +9,14 @@ import {
   WalletConnectModule,
   WalletConnectTargetChain,
 } from "@creit.tech/stellar-wallets-kit/modules/wallet-connect";
-import { LedgerModule } from "@creit.tech/stellar-wallets-kit/modules/ledger";
+import {
+  LEDGER_ID,
+  LedgerModule,
+} from "@creit.tech/stellar-wallets-kit/modules/ledger";
+import {
+  hardwareWalletPaths,
+  activeAddress as kitActiveAddress,
+} from "@creit.tech/stellar-wallets-kit/state";
 import type { StellarNetwork } from "./cctp";
 
 export interface ConnectedWallet {
@@ -117,6 +124,31 @@ export async function listAvailableWallets(
  * address, returns it. Replaces the built-in authModal so we can render our
  * own UI matching the brutalist editorial design system.
  */
+/**
+ * Stellar Ledger path-resolution: kit's authModal normally lets the user pick
+ * an account index then writes the path into its internal signal. We use a
+ * custom picker so that step is skipped — first call to getAddress hits
+ * `mnemonicPath.value === undefined` and crashes with "Cannot read properties
+ * of undefined (reading 'split')". Fix: read account index 0, then register
+ * the path in kit state ourselves.
+ */
+async function resolveLedgerAddress(): Promise<string> {
+  const ledger = getLedgerModule();
+  const accountIndex = 0;
+  const path = `44'/148'/${accountIndex}'`;
+  const { address } = await ledger.getAddress({ path });
+  if (!address) throw new Error("Ledger returned empty address");
+  // Mirror what authModal does internally so subsequent sign / getAddress
+  // calls find the path.
+  const current = hardwareWalletPaths.value ?? [];
+  const next = current
+    .filter((e) => e.publicKey !== address)
+    .concat([{ publicKey: address, index: accountIndex }]);
+  hardwareWalletPaths.value = next;
+  kitActiveAddress.value = address;
+  return address;
+}
+
 export async function selectWallet(
   network: StellarNetwork,
   walletId: string,
@@ -140,6 +172,13 @@ export async function selectWallet(
   }
   ensureInit(network);
   StellarWalletsKit.setWallet(walletId);
+
+  // Ledger needs explicit BIP path setup before fetchAddress.
+  if (walletId === LEDGER_ID) {
+    const address = await resolveLedgerAddress();
+    return { address };
+  }
+
   // fetchAddress runs the module's actual handshake (e.g. WalletConnect QR
   // pairing, Freighter permission prompt). getAddress reads from kit memory
   // and returns empty if no prior session — that surfaces as the misleading
